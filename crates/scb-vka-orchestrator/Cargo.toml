@@ -1,0 +1,24 @@
+[package]
+name = "scb-vka-orchestrator"
+version = "1.0.0"
+edition = "2021"
+description = "SCB-VKA vault lifecycle (VaultManager)"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["mock-hsp"]
+# mock-hsp: Enable mock hardware security provider for development.
+mock-hsp = ["scb-vka-io/mock-hsp"]
+# test-kdf: KDF bellek 256 MiB (test/CI). Açıkken create/unlock hızlanır. Crypto'ya iletir.
+test-kdf = ["scb-vka-crypto/test-kdf"]
+
+[dependencies]
+zeroize = "1.8"
+scb-vka-common = { path = "../scb-vka-common" }
+scb-vka-io = { path = "../scb-vka-io" }
+scb-vka-crypto = { path = "../scb-vka-crypto" }
+scb-vka-memory = { path = "../scb-vka-memory" }
+zerocopy = "0.7"
+
+[dev-dependencies]
+tempfile = "3.25.0"

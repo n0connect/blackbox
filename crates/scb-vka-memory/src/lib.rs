@@ -1,0 +1,283 @@
+//! # scb-vka-memory
+//!
+//! ## MİMARİ GEREKSİNİMLERİ
+//!
+//! Güvenli bellek yönetimi:
+//!
+//! - **SecureBox<T>**: Zeroize-on-drop container
+//! - **SecureBuffer**: Zeroize-on-drop byte buffer
+//! - **mlock**: Swap'a yazılmayı önler (Unix)
+//!
+//! ## KULLANIM
+//!
+//! ```ignore
+//! let key = SecureBox::new([0u8; 32])?;
+//! // key drop edildiğinde otomatik zeroize olur
+//! ```
+
+use std::io::{Seek, SeekFrom, Write};
+use std::ops::Deref;
+use zeroize::Zeroize;
+
+use scb_vka_common::error::{VaultError, VaultErrorKind};
+
+// =============================================================================
+// MLOCK WRAPPERS
+// =============================================================================
+
+#[cfg(unix)]
+fn mem_lock(ptr: *const u8, len: usize) -> Result<(), VaultError> {
+    unsafe {
+        if libc::mlock(ptr as *const std::ffi::c_void, len) != 0 {
+            return Err(VaultError::new(VaultErrorKind::OperationFailed));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn mem_unlock(ptr: *const u8, len: usize) {
+    unsafe {
+        libc::munlock(ptr as *const std::ffi::c_void, len);
+    }
+}
+
+#[cfg(windows)]
+fn mem_lock(ptr: *const u8, len: usize) -> Result<(), VaultError> {
+    use windows_sys::Win32::System::Memory::VirtualLock;
+    unsafe {
+        if VirtualLock(ptr as *mut _, len) == 0 {
+            // VirtualLock failed - may be due to working set limits
+            // Continue without locking rather than failing completely
+            return Err(VaultError::new(VaultErrorKind::OperationFailed));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn mem_unlock(ptr: *const u8, len: usize) {
+    use windows_sys::Win32::System::Memory::VirtualUnlock;
+    unsafe {
+        // Ignore errors - best effort unlock
+        let _ = VirtualUnlock(ptr as *mut _, len);
+    }
+}
+
+// Fallback for unsupported platforms (e.g., WASM)
+#[cfg(not(any(unix, windows)))]
+fn mem_lock(_ptr: *const u8, _len: usize) -> Result<(), VaultError> {
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn mem_unlock(_ptr: *const u8, _len: usize) {}
+
+// =============================================================================
+// SECURE BOX
+// =============================================================================
+
+/// Memory-locked, zeroize-on-drop container.
+pub struct SecureBox<T: Zeroize> {
+    inner: Box<T>,
+}
+
+impl<T: Zeroize> SecureBox<T> {
+    pub fn new(value: T) -> Result<Self, VaultError> {
+        let b = Box::new(value);
+        let ptr = &*b as *const T as *const u8;
+        let len = std::mem::size_of::<T>();
+        mem_lock(ptr, len)?;
+        Ok(Self { inner: b })
+    }
+}
+
+impl<T: Zeroize> Deref for SecureBox<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.inner
+    }
+}
+
+impl<T: Zeroize> Drop for SecureBox<T> {
+    fn drop(&mut self) {
+        self.inner.zeroize();
+        let ptr = &*self.inner as *const T as *const u8;
+        let len = std::mem::size_of::<T>();
+        mem_unlock(ptr, len);
+    }
+}
+
+// =============================================================================
+// SECURE BUFFER
+// =============================================================================
+
+/// Zeroize-on-drop byte buffer.
+pub struct SecureBuffer {
+    inner: Vec<u8>,
+}
+
+impl SecureBuffer {
+    /// Maximum buffer size: 2 MiB (allows for 1 MiB chunk + overhead)
+    pub const MAX_SIZE: usize = 2 * 1024 * 1024;
+
+    /// Create a new secure buffer of specified size.
+    ///
+    /// # Errors
+    /// - `ParameterOutOfRange`: Size exceeds MAX_SIZE (2 MiB)
+    /// - `OperationFailed`: mlock failed (insufficient privileges or limits)
+    pub fn new(size: usize) -> Result<Self, VaultError> {
+        if size > Self::MAX_SIZE {
+            return Err(VaultError::new(VaultErrorKind::ParameterOutOfRange));
+        }
+        let inner = vec![0u8; size];
+        mem_lock(inner.as_ptr(), size)?;
+        Ok(Self { inner })
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.inner
+    }
+}
+
+impl Deref for SecureBuffer {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.inner
+    }
+}
+
+impl Drop for SecureBuffer {
+    fn drop(&mut self) {
+        self.inner.zeroize();
+        mem_unlock(self.inner.as_ptr(), self.inner.len());
+    }
+}
+// ===================================
+// PROCESS HARDENING
+// ===================================
+
+/// Disable Core Dumps (OS specific)
+#[cfg(unix)]
+pub fn disable_core_dumps() -> Result<(), VaultError> {
+    unsafe {
+        // 1. RLIMIT_CORE = 0
+        let rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::setrlimit(libc::RLIMIT_CORE, &rlim) != 0 {
+            return Err(VaultError::new(VaultErrorKind::OperationFailed));
+        }
+
+        // 2. Linux specific PR_SET_DUMPABLE
+        #[cfg(target_os = "linux")]
+        {
+            if libc::prctl(libc::PR_SET_DUMPABLE, 0) != 0 {
+                return Err(VaultError::new(VaultErrorKind::OperationFailed));
+            }
+        }
+
+        // 3. MacOS specific PT_DENY_ATTACH (Anti-Debug)
+        // Note: usage of PT_DENY_ATTACH is discouraged by Apple for App Store,
+        // but for a vault tool it's appropriate defense-in-depth.
+        // However, libc binding might need manual definition or strict flag.
+        // We'll stick to setrlimit for now as it's the standard way to stop core dumps.
+    }
+    Ok(())
+}
+
+/// Disable crash dumps on Windows.
+///
+/// Uses SetErrorMode with SEM_NOGPFAULTERRORBOX to prevent
+/// Windows Error Reporting from creating memory dumps.
+#[cfg(windows)]
+pub fn disable_core_dumps() -> Result<(), VaultError> {
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        SetErrorMode, SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX,
+    };
+    unsafe {
+        // SEM_NOGPFAULTERRORBOX: Prevents WER from creating dumps
+        // SEM_FAILCRITICALERRORS: Prevents system error dialog boxes
+        SetErrorMode(SEM_NOGPFAULTERRORBOX | SEM_FAILCRITICALERRORS);
+    }
+    Ok(())
+}
+
+// Fallback for unsupported platforms
+#[cfg(not(any(unix, windows)))]
+pub fn disable_core_dumps() -> Result<(), VaultError> {
+    Ok(())
+}
+
+// =============================================================================
+// SECURE WIPE
+// =============================================================================
+
+/// Chunk size for secure wipe operations (64 KiB - within mlock limits)
+const WIPE_CHUNK_SIZE: usize = 65_536;
+
+/// Securely wipe a region of a file with CSPRNG random data.
+///
+/// # Security Properties
+/// - Uses getrandom for cryptographically secure randomness
+/// - Processes in chunks to bound memory usage
+/// - Flushes after each chunk to ensure disk write
+/// - Zeroizes the buffer after use
+///
+/// # Arguments
+/// - `writer`: File or writer to wipe
+/// - `offset`: Starting byte offset
+/// - `len`: Number of bytes to overwrite
+pub fn secure_wipe<W: Write + Seek>(
+    writer: &mut W,
+    offset: u64,
+    len: usize,
+) -> Result<(), VaultError> {
+    // PASS 1: Random
+    overwrite_pass(writer, offset, len, None)?;
+    // PASS 2: Zeros
+    overwrite_pass(writer, offset, len, Some(0x00))?;
+    // PASS 3: Random
+    overwrite_pass(writer, offset, len, None)?;
+    Ok(())
+}
+
+fn overwrite_pass<W: Write + Seek>(
+    writer: &mut W,
+    offset: u64,
+    len: usize,
+    pattern: Option<u8>,
+) -> Result<(), VaultError> {
+    writer
+        .seek(SeekFrom::Start(offset))
+        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+
+    let chunk_size = WIPE_CHUNK_SIZE.min(len);
+    let mut chunk = vec![0u8; chunk_size];
+    let mut remaining = len;
+
+    while remaining > 0 {
+        let to_write = chunk_size.min(remaining);
+
+        if let Some(p) = pattern {
+            chunk[..to_write].fill(p);
+        } else {
+            getrandom::getrandom(&mut chunk[..to_write])
+                .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
+        }
+
+        writer
+            .write_all(&chunk[..to_write])
+            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+
+        writer
+            .flush()
+            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+
+        remaining -= to_write;
+    }
+
+    chunk.zeroize();
+    Ok(())
+}

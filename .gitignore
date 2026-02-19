@@ -1,0 +1,37 @@
+# Build
+/target/
+**/*.rs.bk
+# Cargo.lock is tracked for reproducible builds
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*~
+
+# IDE / Editor
+.idea/
+.vscode/
+*.sublime-*
+
+# Local env / secrets (never commit)
+.env
+.env.local
+*.local
+*.pem
+*.key
+
+# Test / debug outputs
+*.log
+/test-vaults/
+/tmp/
+
+# Sandbox: demo vaults and logs stay local (never commit)
+/sandbox/vaults/
+/sandbox/logs/
+/sandbox/*.scb
+/sandbox/*.log
+
+# Agent/implementation reminder (not versioned)
+IMPLEMENTATION_REMINDER.md

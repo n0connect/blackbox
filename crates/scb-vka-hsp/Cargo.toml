@@ -1,0 +1,14 @@
+[package]
+name = "scb-vka-hsp"
+version = "1.0.0"
+edition = "2021"
+description = "Hardware Security Provider - Machine-bound secret derivation"
+
+[dependencies]
+scb-vka-common = { path = "../scb-vka-common" }
+zeroize = { version = "1.8", features = ["derive"] }
+sha2 = "0.10"
+getrandom = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2.11"
