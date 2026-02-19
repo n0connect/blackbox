@@ -40,7 +40,10 @@ impl SpaceManager {
             bitmap[byte_idx] |= 1 << bit_idx;
         }
 
-        Ok(Self { bitmap, total_blocks })
+        Ok(Self {
+            bitmap,
+            total_blocks,
+        })
     }
 
     pub fn from_bytes(bytes: Vec<u8>, total_blocks: u64) -> Result<Self, VaultError> {
@@ -49,7 +52,10 @@ impl SpaceManager {
         if bytes.len() != expected_size {
             return Err(VaultError::new(VaultErrorKind::IntegrityError));
         }
-        Ok(Self { bitmap: bytes, total_blocks })
+        Ok(Self {
+            bitmap: bytes,
+            total_blocks,
+        })
     }
 
     pub fn bitmap_size(&self) -> u64 {
@@ -62,6 +68,27 @@ impl SpaceManager {
 
     pub fn total_blocks(&self) -> u64 {
         self.total_blocks
+    }
+
+    /// Dynamically expand the number of manageable blocks.
+    pub fn expand(&mut self, additional_blocks: u64) -> Result<(), VaultError> {
+        if additional_blocks == 0 {
+            return Ok(());
+        }
+
+        let new_total = self
+            .total_blocks
+            .checked_add(additional_blocks)
+            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
+
+        let current_bytes = self.bitmap.len();
+        let new_bytes = (new_total as usize).div_ceil(8);
+
+        let bytes_to_add = new_bytes.saturating_sub(current_bytes);
+        self.bitmap.extend(std::iter::repeat_n(0, bytes_to_add));
+
+        self.total_blocks = new_total;
+        Ok(())
     }
 
     /// Allocate contiguous blocks. Returns starting block index.
@@ -109,7 +136,8 @@ impl SpaceManager {
 
     fn mark_range(&mut self, start: u64, count: u64, value: bool) -> Result<(), VaultError> {
         // Bounds check: ensure all blocks are within bitmap
-        let end = start.checked_add(count)
+        let end = start
+            .checked_add(count)
             .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
         if end > self.total_blocks {
             return Err(VaultError::new(VaultErrorKind::ParameterOutOfRange));

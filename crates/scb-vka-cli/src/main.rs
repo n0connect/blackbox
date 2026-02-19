@@ -76,6 +76,9 @@ enum Commands {
 
     /// Open interactive shell
     Shell,
+
+    /// Vacuum (compact) the vault, permanently removing space from deleted objects
+    Vacuum,
 }
 
 fn msg(s: &str, quiet: bool) {
@@ -276,14 +279,30 @@ fn run() -> Result<(), String> {
             ok("Deleted", quiet);
         }
 
+        Commands::Vacuum => {
+            let password = prompt_password(false)?;
+            msg("Opening vault...", quiet);
+            let session = manager
+                .unlock_vault(&path, password.as_bytes())
+                .map_err(|e| format!("Unlock: {e:?}"))?;
+            msg(
+                "Vacuuming vault (this may take a while depending on size)...",
+                quiet,
+            );
+            manager
+                .vacuum_vault(session, &path)
+                .map_err(|e| format!("Vacuum: {e:?}"))?;
+            ok("Vault successfully compacted.", quiet);
+        }
+
         Commands::Shell => {
             let password = prompt_password(false)?;
             msg("Starting shell...", quiet);
             let session = manager
                 .unlock_vault(&path, password.as_bytes())
                 .map_err(|e| format!("Unlock: {e:?}"))?;
-            let shell =
-                scb_vka_shell::Shell::new(manager, session).map_err(|e| format!("Shell: {e}"))?;
+            let shell = scb_vka_shell::Shell::new(manager, session, path.clone())
+                .map_err(|e| format!("Shell: {e}"))?;
             shell.run().map_err(|e| format!("Shell: {e}"))?;
         }
     }

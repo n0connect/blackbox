@@ -12,7 +12,8 @@
 //! fakat dış dünyaya kapalı (encapsulated).
 
 pub use scb_vka_common::config::{
-    BLOCK_SIZE, DATA_REGION_START, FILE_ENTRY_SIZE, KEY_LEN, MAGIC_FILE_TABLE, MAGIC_SUPERBLOCK,
+    BLOCK_SIZE, DATA_REGION_START, FILE_ENTRY_SIZE, HEADER_SLOT_A_OFFSET, HEADER_SLOT_B_OFFSET,
+    HEADER_SLOT_CAPACITY, HEADER_SLOT_META_SIZE, KEY_LEN, MAGIC_FILE_TABLE, MAGIC_SUPERBLOCK,
     NONCE_LEN, SUPERBLOCK_OFFSET, SUPERBLOCK_SIZE, TAG_LEN,
 };
 
@@ -20,9 +21,6 @@ use scb_vka_common::error::{VaultError, VaultErrorKind};
 use static_assertions::const_assert;
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 use zeroize::Zeroize;
-
-/// Offset for encrypted header (after superblock)
-pub const VAULT_HEADER_OFFSET: u64 = SUPERBLOCK_SIZE as u64;
 
 /// Wrapped DEK size: nonce(24) + encrypted_key(32) + tag(16) = 72 bytes
 pub const WRAPPED_DEK_SIZE: usize = NONCE_LEN + KEY_LEN + TAG_LEN;
@@ -46,12 +44,8 @@ pub struct Superblock {
     pub(crate) hw_key_handle: [u8; 64],
     pub(crate) vid: [u8; 16],
     pub(crate) enc_hw_secret: [u8; 128],
-    pub(crate) header_offset: u64,
-    pub(crate) header_size: u64,
-    pub(crate) header_iv: [u8; NONCE_LEN],
-    pub(crate) header_mac: [u8; 32],
     #[zeroize(skip)]
-    reserved: [u8; 7840],
+    reserved: [u8; 7912],
 }
 const_assert!(std::mem::size_of::<Superblock>() == SUPERBLOCK_SIZE);
 
@@ -71,11 +65,7 @@ impl Superblock {
             hw_key_handle: [0u8; 64],
             vid,
             enc_hw_secret: [0u8; 128],
-            header_offset: VAULT_HEADER_OFFSET,
-            header_size: 0,
-            header_iv: [0u8; NONCE_LEN],
-            header_mac: [0u8; 32],
-            reserved: [0u8; 7840],
+            reserved: [0u8; 7912],
         }
     }
 
@@ -101,13 +91,6 @@ impl Superblock {
         Ok(())
     }
 
-    /// Update header info (Authenticated field update)
-    pub fn update_header_info(&mut self, size: u64, iv: [u8; NONCE_LEN], mac: [u8; 32]) {
-        self.header_size = size;
-        self.header_iv = iv;
-        self.header_mac = mac;
-    }
-
     // Getters for Orchestrator
     /// Get Salt
     pub fn salt(&self) -> &[u8; 32] {
@@ -124,18 +107,6 @@ impl Superblock {
     /// Get Total Blocks
     pub fn total_blocks(&self) -> u64 {
         self.total_blocks
-    }
-    /// Get Header Offset
-    pub fn header_offset(&self) -> u64 {
-        self.header_offset
-    }
-    /// Get Header Size
-    pub fn header_size(&self) -> u64 {
-        self.header_size
-    }
-    /// Get Header MAC
-    pub fn header_mac(&self) -> &[u8; 32] {
-        &self.header_mac
     }
 
     /// Get Crypto Version
@@ -230,6 +201,10 @@ impl VaultHeader {
     pub fn bitmap_size(&self) -> u32 {
         self.bitmap_size
     }
+    /// Set Bitmap Size (must be called before serialization)
+    pub fn update_bitmap_size(&mut self, size: u32) {
+        self.bitmap_size = size;
+    }
 }
 
 // =============================================================================
@@ -313,6 +288,10 @@ impl FileTableEntry {
     /// Get Start Block
     pub fn start_block(&self) -> u32 {
         self.start_block
+    }
+    /// Set Start Block (Used by Vacuum for compaction)
+    pub fn set_start_block(&mut self, start_block: u32) {
+        self.start_block = start_block;
     }
     /// Get Num Blocks
     pub fn num_blocks(&self) -> u32 {

@@ -23,18 +23,24 @@ pub struct Shell<M> {
     manager: M,
     session: VaultSession,
     editor: DefaultEditor,
+    path: std::path::PathBuf,
 }
 
 impl<M> Shell<M>
 where
     M: VaultManager,
 {
-    pub fn new(manager: M, session: VaultSession) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        manager: M,
+        session: VaultSession,
+        path: std::path::PathBuf,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let editor = DefaultEditor::new()?;
         Ok(Self {
             manager,
             session,
             editor,
+            path,
         })
     }
 
@@ -72,6 +78,7 @@ where
                             }
                         }
                         "help" | "?" => self.print_help(),
+                        "vacuum" => return self.do_vacuum(),
                         "clear" => {
                             print!("\x1B[2J\x1B[1;1H");
                             let _ = std::io::stdout().flush();
@@ -143,6 +150,24 @@ where
         Ok(())
     }
 
+    fn do_vacuum(self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("Vacuuming vault out-of-place (this may take a while)...");
+        match self.manager.vacuum_vault(self.session, &self.path) {
+            Ok(_) => {
+                println!("{}", "Vault successfully compacted.".green());
+                println!("{}", "VaultSession is now closed. Exiting shell.".yellow());
+            }
+            Err(e) => {
+                println!("Error: {e:?}");
+                println!(
+                    "{}",
+                    "Vault lock dropped due to error. Exiting shell.".yellow()
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn parse_id(&self, s: &str) -> Result<[u8; 16], String> {
         let s = s.trim().trim_start_matches("0x");
         if s.len() != 32 {
@@ -163,6 +188,7 @@ where
         println!("  {}     - List objects", "ls".cyan());
         println!("  {} - Show object", "cat <id>".cyan());
         println!("  {}  - Delete object", "rm <id>".cyan());
+        println!("  {}   - Compact vault out-of-place", "vacuum".cyan());
         println!("  {}   - This help", "help".cyan());
         println!("  {}  - Clear screen", "clear".cyan());
         println!("  {}   - Lock and exit", "exit".cyan());

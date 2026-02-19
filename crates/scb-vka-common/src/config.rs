@@ -151,6 +151,23 @@ pub const DATA_REGION_START: u64 = 0x0010_0000;
 pub const FILE_ENTRY_SIZE: usize = 256;
 
 // =============================================================================
+// A/B HEADER SLOTS (Crash Resistance)
+// =============================================================================
+
+/// Header Slot A offset (immediately after Superblock)
+pub const HEADER_SLOT_A_OFFSET: u64 = SUPERBLOCK_SIZE as u64;
+
+/// Header Slot B offset (midpoint of available header region)
+pub const HEADER_SLOT_B_OFFSET: u64 =
+    SUPERBLOCK_SIZE as u64 + (DATA_REGION_START - SUPERBLOCK_SIZE as u64) / 2;
+
+/// Capacity of each header slot in bytes
+pub const HEADER_SLOT_CAPACITY: u64 = (DATA_REGION_START - SUPERBLOCK_SIZE as u64) / 2;
+
+/// Slot metadata overhead: `blob_size`(8) + MAC(32) = 40 bytes
+pub const HEADER_SLOT_META_SIZE: usize = 8 + MAC_LEN;
+
+// =============================================================================
 // HSP (Hardware Security Provider)
 // =============================================================================
 

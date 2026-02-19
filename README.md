@@ -13,13 +13,13 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 
 **Read before use. These limitations are inherent to the design.**
 
-1. **No Crash Recovery**: If a write operation is interrupted (power loss, system crash), the vault may become corrupted. This is intentional. Crash recovery mechanisms create attack surfaces.
+1. **Crash-Resistant Design (A/B Header)**: The vault uses a dual-slot header (A/B ping-pong) to prevent corruption during unexpected power loss. If interrupted, the vault safely reverts to its last healthy state upon next unlock. No WAL is used to strictly maintain the Zero-Trust attack surface.
 
 2. **No Password Change**: Password cannot be changed after vault creation. To change password, create a new vault and migrate data manually.
 
 3. **Single Session Only**: Concurrent access from multiple processes is not supported and will corrupt the vault.
 
-4. **COW Filesystem Limitation**: On Copy-on-Write filesystems (ZFS, Btrfs, APFS with snapshots), secure deletion cannot guarantee data erasure. Old data may persist in filesystem snapshots or copy-on-write blocks.
+4. **COW Filesystem Limitation**: On filesystems like ZFS or APFS, secure deletion tools cannot guarantee erasure of *decrypted* files due to snapshots or block copying. Note: Snapshots of the *encrypted vault file* itself pose no security risk.
 
 5. **Memory Constraints**: SecureBox uses mlock to prevent swapping. Systems with limited memory or strict ulimits may fail to allocate secure memory.
 
