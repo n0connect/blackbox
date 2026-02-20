@@ -14,7 +14,7 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 > | Risk | Description |
 > |------|-------------|
 > | **Password Lost** | No recovery mechanism. Password cannot be reset or changed. If you lost ur password (permanent data loss) |
-> | **Hardware Bound** | Vault is locked to this machine's TPM/Secure Enclave. Moving to another device (permanent data loss). |
+> | **Hardware Bound** | Vault is locked to this machine's TPM/Secure Enclave. Moving to another device or if the chip becomes unusable (permanent data loss). |
 > | **Single Session** | Concurrent access will corrupt the vault irreversibly. |
 > | **No Backup Key** | There is no master key, no backdoor, no recovery phrase. |
 >
