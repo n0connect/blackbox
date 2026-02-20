@@ -711,8 +711,11 @@ impl CryptoEngine for DefaultCryptoEngine {
                 reader
                     .read_exact(&mut mac_bytes)
                     .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-                mac.verify_slice(&mac_bytes)
-                    .map_err(|_| VaultError::new(VaultErrorKind::IntegrityError))?;
+
+                let computed_mac = mac.finalize().into_bytes();
+                if !scb_vka_common::util::ct_eq(&computed_mac, &mac_bytes) {
+                    return Err(VaultError::new(VaultErrorKind::IntegrityError));
+                }
                 break;
             }
 
