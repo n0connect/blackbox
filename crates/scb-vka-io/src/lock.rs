@@ -12,7 +12,7 @@
 //! - Unix (Linux/macOS): POSIX flock
 //! - Windows: LockFileEx/UnlockFileEx
 
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::path::Path;
 
 use scb_vka_common::error::{VaultError, VaultErrorKind};
@@ -44,8 +44,11 @@ impl VaultLock {
     /// - `StorageUnavailable`: File cannot be opened
     /// - `VaultBusy`: File is already locked by another process
     pub fn acquire(path: &Path) -> Result<Self, VaultError> {
-        let file =
-            File::open(path).map_err(|_| VaultError::new(VaultErrorKind::StorageUnavailable))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|_| VaultError::new(VaultErrorKind::StorageUnavailable))?;
 
         let fd = file.as_raw_fd();
         // LOCK_EX: Exclusive lock
@@ -99,8 +102,11 @@ impl VaultLock {
         };
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
-        let file =
-            File::open(path).map_err(|_| VaultError::new(VaultErrorKind::StorageUnavailable))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|_| VaultError::new(VaultErrorKind::StorageUnavailable))?;
 
         let handle = file.as_raw_handle() as HANDLE;
 
@@ -111,9 +117,9 @@ impl VaultLock {
             LockFileEx(
                 handle,
                 LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,          // reserved
-                u32::MAX,   // lock entire file (low)
-                u32::MAX,   // lock entire file (high)
+                0,        // reserved
+                u32::MAX, // lock entire file (low)
+                u32::MAX, // lock entire file (high)
                 &mut overlapped,
             )
         };
@@ -163,8 +169,11 @@ impl Drop for VaultLock {
 #[cfg(not(any(unix, windows)))]
 impl VaultLock {
     pub fn acquire(path: &Path) -> Result<Self, VaultError> {
-        let file =
-            File::open(path).map_err(|_| VaultError::new(VaultErrorKind::StorageUnavailable))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|_| VaultError::new(VaultErrorKind::StorageUnavailable))?;
         Ok(Self { file })
     }
 
