@@ -35,3 +35,21 @@
 
 # Agent/implementation reminder (not versioned)
 IMPLEMENTATION_REMINDER.md
+
+# AI Assistants & Bots
+.gemini/
+.agents/
+.cline/
+.cursor/
+.cursorignore
+.copilot/
+.coderabbit.yaml
+
+# Archives & Temporary files
+*.zip
+*.tar.gz
+*.rar
+/tmp/
+.tmp/
+*.tmp
+*.bak
