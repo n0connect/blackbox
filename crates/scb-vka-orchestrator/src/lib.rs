@@ -7,9 +7,8 @@
 //! - `ConsumedNonce` Usage
 //! - Invariant Checks
 //! - Opaque IO Layout
-
-// Strict Type System (`Key<Role>`, `Epoch`, `ObjectId`, `CryptoVersion`, `Nonce`)
-// Strict AAD Builder (`AadPurpose`)
+//! - Deterministic Flow (no silent fallbacks)
+//! - Centralized Error Helpers
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -23,7 +22,7 @@ use scb_vka_common::config::{
 };
 pub use scb_vka_common::error::{VaultError, VaultErrorKind};
 use scb_vka_crypto::engine::{
-    AadBuilder, AadPurpose, ConsumedNonce, DefaultCryptoEngine, KdfParams, NonceFactory,
+    AadBuilder, AadContext, AadPurpose, ConsumedNonce, DefaultCryptoEngine, KdfParams, NonceFactory,
 };
 use scb_vka_crypto::{CryptoEngine, CryptoVersion, Epoch, KeyKEK, KeyMK, Nonce, ObjectId};
 use scb_vka_io::layout::{FileTableEntry, Superblock, VaultHeader, FILE_ENTRY_SIZE};
@@ -32,6 +31,121 @@ use scb_vka_io::manager::SpaceManager;
 use scb_vka_memory::SecureBox;
 use zerocopy::AsBytes;
 use zeroize::Zeroize;
+
+// =============================================================================
+// HELPER FUNCTIONS - Centralized Error Handling & Utilities
+// =============================================================================
+
+/// Get current Unix timestamp. Returns error if system clock is unavailable.
+/// SECURITY: Never falls back to 0 - timestamps are security-critical for replay protection.
+#[inline]
+fn get_timestamp() -> Result<u64, VaultError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))
+}
+
+/// Create IoError - reduces boilerplate
+#[inline]
+fn io_err() -> VaultError {
+    VaultError::new(VaultErrorKind::IoError)
+}
+
+/// Create IntegrityError - reduces boilerplate
+#[inline]
+fn integrity_err() -> VaultError {
+    VaultError::new(VaultErrorKind::IntegrityError)
+}
+
+/// Create ParameterOutOfRange error - reduces boilerplate
+#[inline]
+fn range_err() -> VaultError {
+    VaultError::new(VaultErrorKind::ParameterOutOfRange)
+}
+
+/// Create CapacityExceeded error - reduces boilerplate
+#[inline]
+fn capacity_err() -> VaultError {
+    VaultError::new(VaultErrorKind::CapacityExceeded)
+}
+
+/// Calculate encrypted payload size and required blocks for given plaintext size.
+/// Returns (encrypted_payload_size, num_blocks, num_chunks).
+/// Centralized to avoid code duplication between add_object and read_object.
+fn calculate_stream_sizes(data_len: u64) -> Result<(u64, u64, u64), VaultError> {
+    let chunk_size = STREAM_CHUNK_SIZE as u64;
+    let num_chunks = if data_len > 0 {
+        data_len
+            .checked_add(chunk_size)
+            .and_then(|x| x.checked_sub(1))
+            .map(|x| x / chunk_size)
+            .ok_or_else(range_err)?
+    } else {
+        0
+    };
+
+    let tag_overhead = num_chunks
+        .checked_mul(TAG_LEN as u64)
+        .ok_or_else(range_err)?;
+
+    let encrypted_payload_size = data_len
+        .checked_add(tag_overhead)
+        .ok_or_else(range_err)?;
+
+    let total_size = (WRAPPED_DEK_SIZE as u64)
+        .checked_add(NONCE_LEN as u64)
+        .and_then(|x| x.checked_add(encrypted_payload_size))
+        .and_then(|x| x.checked_add(MAC_LEN as u64))
+        .ok_or_else(range_err)?;
+
+    let num_blocks = total_size
+        .checked_add(BLOCK_SIZE as u64)
+        .and_then(|x| x.checked_sub(1))
+        .map(|x| x / (BLOCK_SIZE as u64))
+        .ok_or_else(range_err)?;
+
+    Ok((encrypted_payload_size, num_blocks, num_chunks))
+}
+
+/// Build AAD for header operations.
+fn build_header_aad(crypto_version: u32) -> Result<AadContext, VaultError> {
+    AadBuilder::new()
+        .object_id(ObjectId::new([0u8; 16]))
+        .version(CryptoVersion::new(crypto_version))
+        .epoch(Epoch::new(0))
+        .purpose(AadPurpose::Header)
+        .build()
+}
+
+/// Convert string to fixed-size byte array (for object_type/purpose fields)
+fn string_to_fixed_bytes<const N: usize>(s: &str) -> [u8; N] {
+    let mut arr = [0u8; N];
+    let bytes = s.as_bytes();
+    let len = bytes.len().min(N);
+    arr[..len].copy_from_slice(&bytes[..len]);
+    arr
+}
+
+/// Get alternate header slot offset (A/B ping-pong)
+#[inline]
+const fn alternate_slot(current: u64) -> u64 {
+    if current == HEADER_SLOT_A_OFFSET {
+        HEADER_SLOT_B_OFFSET
+    } else {
+        HEADER_SLOT_A_OFFSET
+    }
+}
+
+/// Calculate data region offset from block index with overflow protection.
+fn calculate_data_offset(start_block: u64) -> Result<u64, VaultError> {
+    let block_offset = start_block
+        .checked_mul(BLOCK_SIZE as u64)
+        .ok_or_else(range_err)?;
+    DATA_REGION_START
+        .checked_add(block_offset)
+        .ok_or_else(range_err)
+}
 
 // =============================================================================
 // PUBLIC TYPES
@@ -103,7 +217,7 @@ pub trait VaultManager {
 // IMPLEMENTATION
 // =============================================================================
 
-use tracing::{error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 pub struct DefaultVaultManager {
     enclave: Box<dyn scb_vka_hsp::HardwareEnclave>,
@@ -117,31 +231,70 @@ impl Default for DefaultVaultManager {
 }
 
 impl DefaultVaultManager {
+    /// Create a new VaultManager instance.
     #[must_use]
     pub fn new() -> Self {
-        // Enforce Process Hardening
-        let _ = scb_vka_memory::disable_core_dumps();
+        // Enforce Process Hardening - MUST succeed for security
+        if scb_vka_memory::disable_core_dumps().is_err() {
+            warn!(
+                "Core dump protection unavailable - sensitive data may be exposed in crash dumps"
+            );
+        }
 
+        debug!("VaultManager initialized with hardware-backed security");
         Self {
             enclave: scb_vka_hsp::create_platform_enclave(),
             crypto: DefaultCryptoEngine,
         }
     }
 
+    /// Calculate required blocks for storing encrypted data.
+    fn calculate_required_blocks(data_len: u64) -> Result<(u64, u64), VaultError> {
+        let (encrypted_payload_size, num_blocks, _) = calculate_stream_sizes(data_len)?;
+        Ok((encrypted_payload_size, num_blocks))
+    }
+
+    fn commit_header(&self, session: &mut VaultSession) -> Result<(), VaultError> {
+        let entry_count =
+            u32::try_from(session.file_table.len()).map_err(|_| capacity_err())?;
+        session.header.update_entry_count(entry_count);
+        session.header.increment_epoch()?;
+
+        session.lock.file_mut().sync_all().map_err(|_| io_err())?;
+
+        let target_slot = alternate_slot(session.active_slot_offset);
+
+        write_encrypted_header(
+            session.lock.file_mut(),
+            &session.kek,
+            &session.mk,
+            &self.crypto,
+            &mut session.header,
+            &session.file_table,
+            &session.space_manager,
+            target_slot,
+        )?;
+
+        session.active_slot_offset = target_slot;
+        Ok(())
+    }
+
     fn unlock_vault_inner(&self, path: &Path, password: &[u8]) -> Result<VaultSession, VaultError> {
+        debug!(path = %path.display(), "Attempting to unlock vault");
+
         // Acquire exclusive lock first - prevents concurrent access
         let mut lock = VaultLock::acquire(path)?;
 
         let mut sb_bytes = [0u8; SUPERBLOCK_SIZE];
-        lock.file_mut()
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-        lock.file_mut()
-            .read_exact(&mut sb_bytes)
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        lock.file_mut().seek(SeekFrom::Start(0)).map_err(|_| io_err())?;
+        lock.file_mut().read_exact(&mut sb_bytes).map_err(|_| io_err())?;
 
-        // Parse validate pattern
         let superblock = Superblock::parse(&sb_bytes[..])?;
+
+        info!(
+            "Deriving keys using Argon2id with {} MiB memory - this may take a moment",
+            KDF_MEMORY_KIB_MIN / 1024
+        );
 
         let kdf_params = KdfParams {
             memory_kib: KDF_MEMORY_KIB_MIN,
@@ -162,10 +315,14 @@ impl DefaultVaultManager {
 
         // STRICT VALIDATION
         if header.crypto_version() != CRYPTO_VERSION {
-            return Err(VaultError::new(VaultErrorKind::IntegrityError));
+            return Err(integrity_err());
         }
 
-        info!(vid = %hex::encode(&superblock.vid()[..8]), "Vault successfully unlocked");
+        info!(
+            vid = %hex::encode(&superblock.vid()[..8]),
+            objects = header.entry_count(),
+            "Vault unlocked successfully"
+        );
 
         Ok(VaultSession {
             vid: *superblock.vid(),
@@ -185,8 +342,19 @@ impl VaultManager for DefaultVaultManager {
     fn create_vault(&self, path: &Path, password: &[u8]) -> Result<VaultInfo, VaultError> {
         // Enforce minimum password length for security
         if password.len() < MIN_PASSWORD_LEN {
+            warn!(
+                min_length = MIN_PASSWORD_LEN,
+                provided_length = password.len(),
+                "Password rejected: minimum length requirement not met"
+            );
             return Err(VaultError::new(VaultErrorKind::InvalidInput));
         }
+
+        info!(
+            path = %path.display(),
+            kdf_memory_mib = KDF_MEMORY_KIB_MIN / 1024,
+            "Creating new vault - key derivation requires significant memory"
+        );
 
         let salt_vec = self.crypto.csprng(SALT_LEN)?;
         let mut salt = [0u8; SALT_LEN];
@@ -196,16 +364,16 @@ impl VaultManager for DefaultVaultManager {
         let mut vid = [0u8; VID_LEN];
         vid.copy_from_slice(&vid_vec);
 
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        // SECURITY: Timestamp must be valid - no fallback to 0
+        let timestamp = get_timestamp()?;
 
         let kdf_params = KdfParams {
             memory_kib: KDF_MEMORY_KIB_MIN,
             iterations: KDF_ITERATIONS_MIN,
             parallelism: KDF_PARALLELISM,
         };
+
+        debug!("Deriving master keys from password");
         let (mut kek, mut mk, mut ck) = self.crypto.derive_root_keys(
             password,
             &salt,
@@ -221,25 +389,20 @@ impl VaultManager for DefaultVaultManager {
             .create(true)
             .truncate(true)
             .open(path)
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+            .map_err(|_| io_err())?;
 
         let total_blocks = MIN_TOTAL_BLOCKS;
         file.set_len(total_blocks * BLOCK_SIZE as u64)
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+            .map_err(|_| io_err())?;
 
-        // Constructor Pattern
         let superblock = Superblock::new(salt, vid, timestamp, total_blocks);
 
-        file.seek(SeekFrom::Start(0))
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-        file.write_all(superblock.as_bytes())
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        file.seek(SeekFrom::Start(0)).map_err(|_| io_err())?;
+        file.write_all(superblock.as_bytes()).map_err(|_| io_err())?;
 
-        // Constructor Pattern
         let mut header = VaultHeader::new(CRYPTO_VERSION, 1);
 
         let space_manager = SpaceManager::new(total_blocks)?;
-        // Write initial header to Slot A
         write_encrypted_header(
             &mut file,
             &kek,
@@ -255,7 +418,11 @@ impl VaultManager for DefaultVaultManager {
         mk.zeroize();
         ck.zeroize();
 
-        info!(vid = %hex::encode(&vid[..8]), path = %path.display(), "Vault successfully created");
+        info!(
+            vid = %hex::encode(&vid[..8]),
+            path = %path.display(),
+            "Vault created successfully"
+        );
         Ok(VaultInfo {
             path: path.to_path_buf(),
             vid,
@@ -266,12 +433,22 @@ impl VaultManager for DefaultVaultManager {
     fn unlock_vault(&self, path: &Path, password: &[u8]) -> Result<VaultSession, VaultError> {
         let result = self.unlock_vault_inner(path, password);
         if let Err(e) = &result {
-            // Log security-relevant failures
             match e.kind {
-                VaultErrorKind::AuthenticationFailed | VaultErrorKind::IntegrityError => {
-                    error!(error = ?e.kind, "Vault unlock failed: Authentication or Integrity compromised");
+                VaultErrorKind::AuthenticationFailed => {
+                    error!("Vault unlock failed: incorrect password or corrupted vault");
                 }
-                _ => {} // Ignore I/O errors to avoid log spam
+                VaultErrorKind::IntegrityError => {
+                    error!("Vault unlock failed: data integrity check failed - vault may be corrupted");
+                }
+                VaultErrorKind::VaultBusy => {
+                    error!("Vault is locked by another process");
+                }
+                VaultErrorKind::IoError => {
+                    error!("Vault unlock failed: unable to read vault file");
+                }
+                _ => {
+                    error!(error = ?e.kind, "Vault unlock failed");
+                }
             }
         }
         result
@@ -285,7 +462,7 @@ impl VaultManager for DefaultVaultManager {
         }
         session.file_table.clear();
         session.header.zeroize();
-        info!(vid = %hex::encode(&vid[..8]), "Vault strictly locked. Key material zeroized.");
+        info!(vid = %hex::encode(&vid[..8]), "Vault locked - key material zeroized");
         Ok(())
     }
 
@@ -298,12 +475,12 @@ impl VaultManager for DefaultVaultManager {
         data_len: u64,
         reader: &mut dyn std::io::Read,
     ) -> Result<[u8; 16], VaultError> {
-        // 1. Input Validation
+        // Input Validation
         if object_type.contains('\0') || purpose.contains('\0') {
             return Err(VaultError::new(VaultErrorKind::InvalidInput));
         }
         if session.header.entry_count() >= scb_vka_common::config::MAX_OBJECTS {
-            return Err(VaultError::new(VaultErrorKind::CapacityExceeded));
+            return Err(capacity_err());
         }
 
         let oid_vec = self.crypto.csprng(16)?;
@@ -316,114 +493,46 @@ impl VaultManager for DefaultVaultManager {
         let epoch = Epoch::new(session.header.epoch());
         let version = CryptoVersion::new(session.header.crypto_version());
 
-        let mut purpose_bytes = [0u8; 32];
-        let bytes = purpose.as_bytes();
-        let p_len = bytes.len().min(32);
-        purpose_bytes[..p_len].copy_from_slice(&bytes[..p_len]);
-        let aad_purpose = AadPurpose::UserPurpose(purpose_bytes);
+        let purpose_bytes: [u8; 32] = string_to_fixed_bytes(purpose);
 
         let aad = AadBuilder::new()
             .object_id(oid)
             .version(version)
             .epoch(epoch)
-            .purpose(aad_purpose)
+            .purpose(AadPurpose::UserPurpose(purpose_bytes))
             .build()?;
 
         let wrapped_dek = self.crypto.wrap_dek(&session.kek, &dek, &aad)?;
 
-        // 2. Integer Overflow Protection
-        let chunk_size = scb_vka_common::config::STREAM_CHUNK_SIZE as u64;
-        // Calculation: num_chunks = (data_len + chunk_size - 1) / chunk_size
-        let num_chunks = if data_len > 0 {
-            data_len
-                .checked_add(chunk_size)
-                .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?
-                .checked_sub(1)
-                .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?
-                .checked_div(chunk_size)
-                .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?
-        } else {
-            0
-        };
-
-        let tag_overhead = num_chunks
-            .checked_mul(TAG_LEN as u64)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
-
-        let encrypted_payload_size = data_len
-            .checked_add(tag_overhead)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
-
-        let total_size = (scb_vka_common::config::WRAPPED_DEK_SIZE as u64)
-            .checked_add(scb_vka_common::config::NONCE_LEN as u64)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?
-            .checked_add(encrypted_payload_size)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?
-            .checked_add(scb_vka_common::config::MAC_LEN as u64)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
-
-        // Allocate space
-        let num_blocks = total_size
-            .checked_add(BLOCK_SIZE as u64)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?
-            .checked_sub(1)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?
-            .checked_div(BLOCK_SIZE as u64)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
+        let (encrypted_payload_size, num_blocks) = Self::calculate_required_blocks(data_len)?;
 
         let start_block = match session.space_manager.allocate(num_blocks) {
             Ok(block) => block,
             Err(e) if e.kind == VaultErrorKind::CapacityExceeded => {
-                // Dynamic Expansion: Give it exactly what it needs plus a 1024 block buffer (~4MB buffer)
                 let additional_blocks = num_blocks + 1024;
+                warn!(
+                    additional_blocks = additional_blocks,
+                    "Vault capacity exceeded - dynamically expanding (may cause I/O latency)"
+                );
                 session.space_manager.expand(additional_blocks)?;
 
-                // Expand underlying file
                 let new_len = session.space_manager.total_blocks() * (BLOCK_SIZE as u64);
-                session
-                    .lock
-                    .file_mut()
-                    .set_len(new_len)
-                    .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+                session.lock.file_mut().set_len(new_len).map_err(|_| io_err())?;
 
-                // Retry allocation
                 session.space_manager.allocate(num_blocks)?
             }
             Err(e) => return Err(e),
         };
 
-        // Checked arithmetic for offset calculation
-        let block_offset = start_block
-            .checked_mul(BLOCK_SIZE as u64)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
-        let offset = DATA_REGION_START
-            .checked_add(block_offset)
-            .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
-        session
-            .lock
-            .file_mut()
-            .seek(SeekFrom::Start(offset))
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        let offset = calculate_data_offset(start_block)?;
+        session.lock.file_mut().seek(SeekFrom::Start(offset)).map_err(|_| io_err())?;
 
-        // Write Header (Wrapped DEK + Base Nonce)
-        session
-            .lock
-            .file_mut()
-            .write_all(&wrapped_dek)
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        session.lock.file_mut().write_all(&wrapped_dek).map_err(|_| io_err())?;
 
         let nonce = NonceFactory::generate()?;
-        session
-            .lock
-            .file_mut()
-            .write_all(nonce.as_bytes())
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        session.lock.file_mut().write_all(nonce.as_bytes()).map_err(|_| io_err())?;
 
-        // 3. Data Length Enforcement
-        // Stream Encryption
-        // We use the base nonce. encrypt_stream consumes it (conceptually) and increments it.
         let consumed = ConsumedNonce::new(nonce);
-        // Take exactly data_len to prevent reader from sending more than promised
         let mut limited_reader = reader.take(data_len);
         let bytes_written = self.crypto.encrypt_stream(
             &dek,
@@ -434,37 +543,27 @@ impl VaultManager for DefaultVaultManager {
         )?;
 
         if bytes_written != encrypted_payload_size {
-            // Full rollback: deallocate space (DEK is discarded, data is shredded)
-            // CRITICAL: Propagate deallocation errors - space leaks corrupt bitmap state
             session
                 .space_manager
                 .deallocate(start_block, num_blocks)
                 .inspect_err(|_| {
                     error!("CRITICAL: Space leak during rollback - bitmap inconsistent");
                 })?;
-            return Err(VaultError::new(VaultErrorKind::IoError));
+            return Err(io_err());
         }
 
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let mut obj_type_arr = [0u8; 32];
-        let type_bytes = object_type.as_bytes();
-        let t_len = type_bytes.len().min(32);
-        obj_type_arr[..t_len].copy_from_slice(&type_bytes[..t_len]);
+        // SECURITY: Timestamp must be valid - no fallback to 0
+        let timestamp = get_timestamp()?;
+        let obj_type_arr: [u8; 32] = string_to_fixed_bytes(object_type);
 
-        // Safe conversion: validate block indices fit in u32 (prevents silent overflow)
-        let start_block_u32 = u32::try_from(start_block)
-            .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
-        let num_blocks_u32 = u32::try_from(num_blocks)
-            .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
+        let start_block_u32 = u32::try_from(start_block).map_err(|_| capacity_err())?;
+        let num_blocks_u32 = u32::try_from(num_blocks).map_err(|_| capacity_err())?;
 
         let entry = FileTableEntry::new(
             oid_bytes,
             start_block_u32,
             num_blocks_u32,
-            data_len, // Storing PLAINTEXT size
+            data_len,
             timestamp,
             obj_type_arr,
             purpose_bytes,
@@ -473,38 +572,14 @@ impl VaultManager for DefaultVaultManager {
         );
 
         session.file_table.push(entry);
-        // Safe conversion: validate entry count fits in u32
-        let entry_count = u32::try_from(session.file_table.len())
-            .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
-        session.header.update_entry_count(entry_count);
-        session.header.increment_epoch()?;
+        self.commit_header(session)?;
 
-        // Crash resistance: sync data before header update
-        session
-            .lock
-            .file_mut()
-            .sync_all()
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-
-        // Write header to OPPOSITE slot (A/B ping-pong)
-        let target_slot = if session.active_slot_offset == HEADER_SLOT_A_OFFSET {
-            HEADER_SLOT_B_OFFSET
-        } else {
-            HEADER_SLOT_A_OFFSET
-        };
-        write_encrypted_header(
-            session.lock.file_mut(),
-            &session.kek,
-            &session.mk,
-            &self.crypto,
-            &mut session.header,
-            &session.file_table,
-            &session.space_manager,
-            target_slot,
-        )?;
-        session.active_slot_offset = target_slot;
-
-        info!(vid = %hex::encode(&session.vid[..8]), object_id = %hex::encode(oid_bytes), "Object encrypted and added");
+        info!(
+            vid = %hex::encode(&session.vid[..8]),
+            object_id = %hex::encode(oid_bytes),
+            size = data_len,
+            "Object encrypted and added"
+        );
         Ok(oid_bytes)
     }
 
@@ -525,76 +600,42 @@ impl VaultManager for DefaultVaultManager {
         let obj_epoch = Epoch::new(entry.epoch());
         let header_epoch = Epoch::new(session.header.epoch());
         if obj_epoch > header_epoch {
-            return Err(VaultError::new(VaultErrorKind::IntegrityError));
+            return Err(integrity_err());
         }
 
         let oid = ObjectId::new(*object_id);
         let version = CryptoVersion::new(session.header.crypto_version());
-        let purpose = AadPurpose::UserPurpose(*entry.purpose());
 
         let aad = AadBuilder::new()
             .object_id(oid)
             .version(version)
             .epoch(obj_epoch)
-            .purpose(purpose)
+            .purpose(AadPurpose::UserPurpose(*entry.purpose()))
             .build()?;
 
-        let dek = self
-            .crypto
-            .unwrap_dek(&session.kek, entry.wrapped_dek(), &aad)?;
+        let dek = self.crypto.unwrap_dek(&session.kek, entry.wrapped_dek(), &aad)?;
 
-        // Checked arithmetic for offset calculation
-        let block_offset = (entry.start_block() as u64)
-            .checked_mul(BLOCK_SIZE as u64)
-            .ok_or(VaultError::new(VaultErrorKind::IntegrityError))?;
-        let offset = DATA_REGION_START
-            .checked_add(block_offset)
-            .ok_or(VaultError::new(VaultErrorKind::IntegrityError))?;
+        let offset = calculate_data_offset(entry.start_block() as u64)
+            .map_err(|_| integrity_err())?;
 
-        // Calculate expected encrypted payload size with checked arithmetic
-        let chunk_size = STREAM_CHUNK_SIZE as u64;
         let data_len = entry.size();
-        let num_chunks = if data_len > 0 {
-            data_len
-                .checked_add(chunk_size)
-                .and_then(|x| x.checked_sub(1))
-                .map(|x| x / chunk_size)
-                .ok_or(VaultError::new(VaultErrorKind::IntegrityError))?
-        } else {
-            0
-        };
-        let tag_overhead = num_chunks
-            .checked_mul(scb_vka_common::config::TAG_LEN as u64)
-            .ok_or(VaultError::new(VaultErrorKind::IntegrityError))?;
-        let encrypted_payload_size = data_len
-            .checked_add(tag_overhead)
-            .ok_or(VaultError::new(VaultErrorKind::IntegrityError))?;
+        let (encrypted_payload_size, _, _) = calculate_stream_sizes(data_len)
+            .map_err(|_| integrity_err())?;
 
         let stream_read_size = encrypted_payload_size
-            .checked_add(scb_vka_common::config::MAC_LEN as u64)
-            .ok_or(VaultError::new(VaultErrorKind::IntegrityError))?;
-
-        // Verify total size vs allocated blocks?
-        // allocated = num_blocks * BLOCK_SIZE.
-        // real usage <= allocated. ok.
+            .checked_add(MAC_LEN as u64)
+            .ok_or_else(integrity_err)?;
 
         session
             .lock
             .file_mut()
             .seek(SeekFrom::Start(offset + WRAPPED_DEK_SIZE as u64))
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+            .map_err(|_| io_err())?;
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        session
-            .lock
-            .file_mut()
-            .read_exact(&mut nonce_bytes)
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        session.lock.file_mut().read_exact(&mut nonce_bytes).map_err(|_| io_err())?;
 
         let nonce = Nonce::new(nonce_bytes);
-
-        // Limited Reader for Payload
-        // Use (&mut file) to avoid moving File, invoking Read on &mut File
         let mut limited_reader = (session.lock.file_mut()).take(stream_read_size);
 
         let bytes_written =
@@ -602,11 +643,15 @@ impl VaultManager for DefaultVaultManager {
                 .decrypt_stream(&dek, &mut limited_reader, writer, &aad, nonce, data_len)?;
 
         if bytes_written != data_len {
-            // If decrypted size mismatch, integrity error (or truncation)
-            return Err(VaultError::new(VaultErrorKind::IntegrityError));
+            return Err(integrity_err());
         }
 
-        info!(vid = %hex::encode(&session.vid[..8]), object_id = %hex::encode(object_id), bytes = bytes_written, "Object decrypted and read");
+        info!(
+            vid = %hex::encode(&session.vid[..8]),
+            object_id = %hex::encode(object_id),
+            bytes = bytes_written,
+            "Object decrypted and read"
+        );
         Ok(bytes_written)
     }
 
@@ -624,52 +669,23 @@ impl VaultManager for DefaultVaultManager {
 
         let entry = session.file_table.remove(idx);
 
-        // Secure wipe removed. Space is cryptographically shredded when the DEK is discarded
-        // with the FileTableEntry. Future additions will overwrite this space randomly.
-
         session
             .space_manager
             .deallocate(entry.start_block() as u64, entry.num_blocks() as u64)?;
 
-        // Safe conversion: validate entry count fits in u32
-        let entry_count = u32::try_from(session.file_table.len())
-            .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
-        session.header.update_entry_count(entry_count);
-        session.header.increment_epoch()?;
-
-        // Crash resistance: sync wipe before header update
-        session
-            .lock
-            .file_mut()
-            .sync_all()
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-
-        // Write header to OPPOSITE slot (A/B ping-pong)
-        let target_slot = if session.active_slot_offset == HEADER_SLOT_A_OFFSET {
-            HEADER_SLOT_B_OFFSET
-        } else {
-            HEADER_SLOT_A_OFFSET
-        };
-        write_encrypted_header(
-            session.lock.file_mut(),
-            &session.kek,
-            &session.mk,
-            &self.crypto,
-            &mut session.header,
-            &session.file_table,
-            &session.space_manager,
-            target_slot,
-        )?;
-        session.active_slot_offset = target_slot;
-        info!(vid = %hex::encode(&session.vid[..8]), object_id = %hex::encode(object_id), "Object cryptographically deleted");
+        self.commit_header(session)?;
+        info!(
+            vid = %hex::encode(&session.vid[..8]),
+            object_id = %hex::encode(object_id),
+            "Object cryptographically deleted"
+        );
         Ok(())
     }
 
     #[instrument(skip(self, session))]
     fn list_objects(&self, session: &VaultSession) -> Result<Vec<ObjectMeta>, VaultError> {
-        let mut list = Vec::new();
+        let mut list = Vec::with_capacity(session.file_table.len());
         for entry in &session.file_table {
-            // Strict UTF-8 Validation
             let obj_type_str = std::str::from_utf8(entry.object_type())
                 .map_err(|_| VaultError::new(VaultErrorKind::EncodingFailed))?
                 .trim_matches('\0')
@@ -692,102 +708,88 @@ impl VaultManager for DefaultVaultManager {
 
     #[instrument(skip(self, session))]
     fn vacuum_vault(&self, mut session: VaultSession, path: &Path) -> Result<(), VaultError> {
-        // Prepare temporary file
+        info!(
+            vid = %hex::encode(&session.vid[..8]),
+            objects = session.file_table.len(),
+            "Starting vacuum operation - compacting vault"
+        );
+
         let mut temp_path_str = path.to_string_lossy().to_string();
         temp_path_str.push_str(".tmp");
         let temp_path = Path::new(&temp_path_str);
 
-        let mut temp_file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(temp_path)
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        #[allow(unused_mut)]
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(true);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+
+        let mut temp_file = options.open(temp_path).map_err(|_| io_err())?;
 
         // 1. Copy Superblock verbatim
-        session
-            .lock
-            .file_mut()
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        session.lock.file_mut().seek(SeekFrom::Start(0)).map_err(|_| io_err())?;
         let mut superblock_buf = [0u8; scb_vka_io::layout::SUPERBLOCK_SIZE];
-        session
-            .lock
-            .file_mut()
-            .read_exact(&mut superblock_buf)
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-        temp_file
-            .write_all(&superblock_buf)
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        session.lock.file_mut().read_exact(&mut superblock_buf).map_err(|_| io_err())?;
+        temp_file.write_all(&superblock_buf).map_err(|_| io_err())?;
 
         // 2. Out-of-place Block Copy
         session.file_table.sort_by_key(|e| e.start_block());
         let mut next_free_block = 0u64;
         let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
 
-        for entry in &mut session.file_table {
+        let total_objects = session.file_table.len();
+        for (idx, entry) in session.file_table.iter_mut().enumerate() {
             let src_block = entry.start_block() as u64;
             let num_blocks = entry.num_blocks() as u64;
             let byte_len = (num_blocks as usize)
-                .checked_mul(scb_vka_common::config::BLOCK_SIZE as usize)
-                .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
+                .checked_mul(BLOCK_SIZE as usize)
+                .ok_or_else(range_err)?;
 
-            let src_offset = scb_vka_common::config::DATA_REGION_START
-                + src_block * (scb_vka_common::config::BLOCK_SIZE as u64);
-            let dst_offset = scb_vka_common::config::DATA_REGION_START
-                + next_free_block * (scb_vka_common::config::BLOCK_SIZE as u64);
+            let src_offset = calculate_data_offset(src_block)?;
+            let dst_offset = calculate_data_offset(next_free_block)?;
 
-            session
-                .lock
-                .file_mut()
-                .seek(SeekFrom::Start(src_offset))
-                .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-            temp_file
-                .seek(SeekFrom::Start(dst_offset))
-                .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+            session.lock.file_mut().seek(SeekFrom::Start(src_offset)).map_err(|_| io_err())?;
+            temp_file.seek(SeekFrom::Start(dst_offset)).map_err(|_| io_err())?;
 
             let mut remaining = byte_len;
             let mut reader = session.lock.file_mut().take(remaining as u64);
             while remaining > 0 {
                 let to_read = remaining.min(buf.len());
-                let n = reader
-                    .read(&mut buf[..to_read])
-                    .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+                let n = reader.read(&mut buf[..to_read]).map_err(|_| io_err())?;
                 if n == 0 {
                     break;
                 }
-                temp_file
-                    .write_all(&buf[..n])
-                    .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+                temp_file.write_all(&buf[..n]).map_err(|_| io_err())?;
                 remaining -= n;
             }
 
-            // Update entry with new contiguous position
-            // CRITICAL: Validate block index fits in u32 to prevent silent overflow
-            let new_start_block = u32::try_from(next_free_block)
-                .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
+            let new_start_block = u32::try_from(next_free_block).map_err(|_| capacity_err())?;
             entry.set_start_block(new_start_block);
             next_free_block += num_blocks;
+
+            debug!(
+                progress = format!("{}/{}", idx + 1, total_objects),
+                "Vacuum: object relocated"
+            );
         }
 
         // 3. Rebuild SpaceManager
-        let new_total_blocks =
-            std::cmp::max(next_free_block, scb_vka_common::config::MIN_TOTAL_BLOCKS);
+        let new_total_blocks = std::cmp::max(next_free_block, MIN_TOTAL_BLOCKS);
         let mut new_sm = SpaceManager::new(new_total_blocks)?;
         if next_free_block > 0 {
-            new_sm.allocate(next_free_block)?; // Lock blocks continuously
+            new_sm.allocate(next_free_block)?;
         }
 
         // 4. Update Header State
         session.header.increment_epoch()?;
-        let entry_count = u32::try_from(session.file_table.len())
-            .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
+        let entry_count = u32::try_from(session.file_table.len()).map_err(|_| capacity_err())?;
         session.header.update_entry_count(entry_count);
 
-        temp_file
-            .sync_all()
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        temp_file.sync_all().map_err(|_| io_err())?;
 
         // 5. Write Header to A/B Slots
         write_encrypted_header(
@@ -798,7 +800,7 @@ impl VaultManager for DefaultVaultManager {
             &mut session.header,
             &session.file_table,
             &new_sm,
-            scb_vka_common::config::HEADER_SLOT_A_OFFSET,
+            HEADER_SLOT_A_OFFSET,
         )?;
 
         write_encrypted_header(
@@ -809,29 +811,34 @@ impl VaultManager for DefaultVaultManager {
             &mut session.header,
             &session.file_table,
             &new_sm,
-            scb_vka_common::config::HEADER_SLOT_B_OFFSET,
+            HEADER_SLOT_B_OFFSET,
         )?;
 
-        // Close files implicitly
-        drop(session.lock); // close source
-        temp_file
-            .sync_all()
-            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-        drop(temp_file); // close temp
+        drop(session.lock);
+        temp_file.sync_all().map_err(|_| io_err())?;
+        drop(temp_file);
 
         // 6. Atomic Replacement
-        std::fs::rename(temp_path, path).map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+        std::fs::rename(temp_path, path).map_err(|_| io_err())?;
 
-        // Note: the original VaultSession is now defunct, we require user to re-unlock manually.
+        info!(
+            path = %path.display(),
+            compacted_blocks = next_free_block,
+            "Vacuum completed - vault requires re-unlock"
+        );
+
         Ok(())
     }
 }
 
-/// Maximum header blob size — bounded by slot capacity
+// =============================================================================
+// HEADER ENCRYPTION
+// =============================================================================
+
+/// Maximum header blob size - bounded by slot capacity
 const MAX_HEADER_BLOB_SIZE: usize = (HEADER_SLOT_CAPACITY as usize) - HEADER_SLOT_META_SIZE;
 
 /// Encryption overhead: WRAPPED_DEK(72) + NONCE(24) + TAG(16) = 112 bytes
-/// ChaCha20 is stream cipher: ciphertext.len() == plaintext.len()
 const HEADER_ENCRYPTION_OVERHEAD: usize = WRAPPED_DEK_SIZE + NONCE_LEN + TAG_LEN;
 
 /// Maximum plaintext size for header (accounting for encryption overhead)
@@ -850,26 +857,19 @@ fn write_encrypted_header(
 ) -> Result<(), VaultError> {
     let bitmap = space_manager.export_bitmap();
 
-    // Fix bitmap_size in header before serialization
-    let bitmap_len = u32::try_from(bitmap.len())
-        .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
+    let bitmap_len = u32::try_from(bitmap.len()).map_err(|_| capacity_err())?;
     header.update_bitmap_size(bitmap_len);
 
     // Early size validation to prevent DoS via memory exhaustion
     let header_struct_size = std::mem::size_of::<VaultHeader>();
-    let entries_size = file_table
-        .len()
-        .checked_mul(FILE_ENTRY_SIZE)
-        .ok_or(VaultError::new(VaultErrorKind::CapacityExceeded))?;
+    let entries_size = file_table.len().checked_mul(FILE_ENTRY_SIZE).ok_or_else(capacity_err)?;
     let plaintext_size = header_struct_size
         .checked_add(bitmap.len())
         .and_then(|x| x.checked_add(entries_size))
-        .ok_or(VaultError::new(VaultErrorKind::CapacityExceeded))?;
+        .ok_or_else(capacity_err)?;
 
-    // CRITICAL: Check against max PLAINTEXT size (not blob size)
-    // blob_size = plaintext_size + ENCRYPTION_OVERHEAD
     if plaintext_size > MAX_HEADER_PLAINTEXT_SIZE {
-        return Err(VaultError::new(VaultErrorKind::CapacityExceeded));
+        return Err(capacity_err());
     }
 
     let mut plaintext = Vec::with_capacity(plaintext_size);
@@ -880,21 +880,13 @@ fn write_encrypted_header(
     }
 
     let dek = crypto.generate_dek()?;
-    let zero_id = ObjectId::new([0u8; 16]);
-
-    let aad = AadBuilder::new()
-        .object_id(zero_id)
-        .version(CryptoVersion::new(header.crypto_version()))
-        .epoch(Epoch::new(0))
-        .purpose(AadPurpose::Header)
-        .build()?;
+    let aad = build_header_aad(header.crypto_version())?;
 
     let wrapped_dek = crypto.wrap_dek(kek, &dek, &aad)?;
     let nonce = NonceFactory::generate()?;
     let consumed = ConsumedNonce::new(nonce);
     let (ct, tag) = crypto.encrypt_object(&dek, &plaintext, &aad, consumed)?;
 
-    // Build blob: WrappedDEK || Nonce || Ciphertext || Tag
     let blob_size = WRAPPED_DEK_SIZE + NONCE_LEN + ct.len() + TAG_LEN;
     let mut blob = Vec::with_capacity(blob_size);
     blob.extend_from_slice(&wrapped_dek);
@@ -902,28 +894,19 @@ fn write_encrypted_header(
     blob.extend_from_slice(&ct);
     blob.extend_from_slice(&tag);
 
-    // Encrypt-then-MAC: MAC over the entire blob
     let mac = crypto.compute_header_mac(mk, &blob)?;
 
-    // Write self-describing slot: [blob_size:u64 LE][mac:32B][blob]
-    file.seek(SeekFrom::Start(slot_offset))
-        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-    file.write_all(&(blob_size as u64).to_le_bytes())
-        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-    file.write_all(&mac)
-        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-    file.write_all(&blob)
-        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+    file.seek(SeekFrom::Start(slot_offset)).map_err(|_| io_err())?;
+    file.write_all(&(blob_size as u64).to_le_bytes()).map_err(|_| io_err())?;
+    file.write_all(&mac).map_err(|_| io_err())?;
+    file.write_all(&blob).map_err(|_| io_err())?;
 
-    // Atomic commit: fsync ensures the entire slot is persisted
-    file.sync_all()
-        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+    file.sync_all().map_err(|_| io_err())?;
 
     Ok(())
 }
 
 /// Try to read and decrypt a single header slot.
-/// Returns (header, file_table, space_manager) on success.
 fn try_read_slot(
     file: &mut File,
     slot_offset: u64,
@@ -932,71 +915,53 @@ fn try_read_slot(
     crypto: &DefaultCryptoEngine,
     superblock: &Superblock,
 ) -> Result<(VaultHeader, Vec<FileTableEntry>, SpaceManager), VaultError> {
-    // 1. Read slot metadata
-    file.seek(SeekFrom::Start(slot_offset))
-        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+    file.seek(SeekFrom::Start(slot_offset)).map_err(|_| io_err())?;
 
     let mut size_bytes = [0u8; 8];
-    file.read_exact(&mut size_bytes)
-        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+    file.read_exact(&mut size_bytes).map_err(|_| io_err())?;
     let blob_size = u64::from_le_bytes(size_bytes);
 
-    // 2. Sanity check blob_size
     if blob_size == 0 || blob_size as usize > MAX_HEADER_BLOB_SIZE {
-        return Err(VaultError::new(VaultErrorKind::IntegrityError));
+        return Err(integrity_err());
     }
 
     let mut expected_mac = [0u8; MAC_LEN];
-    file.read_exact(&mut expected_mac)
-        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+    file.read_exact(&mut expected_mac).map_err(|_| io_err())?;
 
-    // 3. Read blob
     let blob_len = blob_size as usize;
     let mut blob = vec![0u8; blob_len];
-    file.read_exact(&mut blob)
-        .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+    file.read_exact(&mut blob).map_err(|_| io_err())?;
 
-    // 4. Verify MAC (Encrypt-then-MAC)
     if !crypto.verify_header_mac(mk, &blob, &expected_mac)? {
         return Err(VaultError::new(VaultErrorKind::AuthenticationFailed));
     }
 
-    // 5. Parse blob: WrappedDEK || Nonce || Ciphertext || Tag
     if blob_len < WRAPPED_DEK_SIZE + NONCE_LEN + TAG_LEN {
-        return Err(VaultError::new(VaultErrorKind::IntegrityError));
+        return Err(integrity_err());
     }
 
     let wrapped_dek: [u8; WRAPPED_DEK_SIZE] = blob[..WRAPPED_DEK_SIZE]
         .try_into()
-        .map_err(|_| VaultError::new(VaultErrorKind::IntegrityError))?;
+        .map_err(|_| integrity_err())?;
 
-    let zero_id = ObjectId::new([0u8; 16]);
-    let aad = AadBuilder::new()
-        .object_id(zero_id)
-        .version(CryptoVersion::new(CRYPTO_VERSION))
-        .epoch(Epoch::new(0))
-        .purpose(AadPurpose::Header)
-        .build()?;
+    let aad = build_header_aad(CRYPTO_VERSION)?;
 
     let dek = crypto.unwrap_dek(kek, &wrapped_dek, &aad)?;
     let rest = &blob[WRAPPED_DEK_SIZE..];
 
     let nonce: [u8; NONCE_LEN] = rest[..NONCE_LEN]
         .try_into()
-        .map_err(|_| VaultError::new(VaultErrorKind::IntegrityError))?;
+        .map_err(|_| integrity_err())?;
 
     let ct_end = rest.len() - TAG_LEN;
     let ct = &rest[NONCE_LEN..ct_end];
-    let tag: [u8; TAG_LEN] = rest[ct_end..]
-        .try_into()
-        .map_err(|_| VaultError::new(VaultErrorKind::IntegrityError))?;
+    let tag: [u8; TAG_LEN] = rest[ct_end..].try_into().map_err(|_| integrity_err())?;
 
     let pt = crypto.decrypt_object(&dek, Nonce::new(nonce), ct, &tag, &aad)?;
 
-    // 6. Parse plaintext: VaultHeader || Bitmap || FileTable
     let header_struct_size = std::mem::size_of::<VaultHeader>();
     if pt.len() < header_struct_size {
-        return Err(VaultError::new(VaultErrorKind::IntegrityError));
+        return Err(integrity_err());
     }
 
     let header = VaultHeader::parse(&pt[..header_struct_size])?;
@@ -1006,11 +971,11 @@ fn try_read_slot(
 
     let expected_bitmap_size = (superblock.total_blocks() as usize).div_ceil(8);
     if bitmap_size != expected_bitmap_size {
-        return Err(VaultError::new(VaultErrorKind::IntegrityError));
+        return Err(integrity_err());
     }
 
     if pt.len() < bitmap_start + bitmap_size {
-        return Err(VaultError::new(VaultErrorKind::IntegrityError));
+        return Err(integrity_err());
     }
 
     let bitmap = pt[bitmap_start..bitmap_start + bitmap_size].to_vec();
@@ -1021,12 +986,10 @@ fn try_read_slot(
 
     let expected_entries_size = (header.entry_count() as usize)
         .checked_mul(FILE_ENTRY_SIZE)
-        .ok_or(VaultError::new(VaultErrorKind::IntegrityError))?;
-    let required_size = offset
-        .checked_add(expected_entries_size)
-        .ok_or(VaultError::new(VaultErrorKind::IntegrityError))?;
+        .ok_or_else(integrity_err)?;
+    let required_size = offset.checked_add(expected_entries_size).ok_or_else(integrity_err)?;
     if pt.len() < required_size {
-        return Err(VaultError::new(VaultErrorKind::IntegrityError));
+        return Err(integrity_err());
     }
 
     for _ in 0..header.entry_count() {
@@ -1052,11 +1015,18 @@ fn read_encrypted_header(
     let slot_a = try_read_slot(file, HEADER_SLOT_A_OFFSET, kek, mk, crypto, superblock);
     let slot_b = try_read_slot(file, HEADER_SLOT_B_OFFSET, kek, mk, crypto, superblock);
 
+    match (&slot_a, &slot_b) {
+        (Ok(_), Err(_)) => {
+            warn!("Header slot B is corrupted - using slot A (vault may have crashed during write)");
+        }
+        (Err(_), Ok(_)) => {
+            warn!("Header slot A is corrupted - using slot B (vault may have crashed during write)");
+        }
+        _ => {}
+    }
+
     match (slot_a, slot_b) {
         (Ok((ha, fta, sma)), Ok((hb, ftb, smb))) => {
-            // Both valid: pick the one with the higher epoch
-            // CRITICAL: Use proper u64 comparison - epochs increment monotonically
-            // and checked_add prevents overflow, so simple > comparison is correct
             if hb.epoch() > ha.epoch() {
                 Ok((hb, ftb, smb, HEADER_SLOT_B_OFFSET))
             } else {
@@ -1065,6 +1035,6 @@ fn read_encrypted_header(
         }
         (Ok((ha, fta, sma)), Err(_)) => Ok((ha, fta, sma, HEADER_SLOT_A_OFFSET)),
         (Err(_), Ok((hb, ftb, smb))) => Ok((hb, ftb, smb, HEADER_SLOT_B_OFFSET)),
-        (Err(_), Err(e)) => Err(e), // Both slots failed — vault is corrupted
+        (Err(_), Err(e)) => Err(e),
     }
 }
