@@ -127,6 +127,9 @@ pub const BLOCK_SIZE: u32 = 4096;
 /// Maximum vault size (12 GB)
 pub const MAX_VAULT_SIZE: u64 = 12 * 1024 * 1024 * 1024;
 
+/// Vacuum buffer size (8 MB)
+pub const VACUUM_BUFFER_SIZE: usize = 8 * 1024 * 1024;
+
 /// Maximum total blocks (derived from `MAX_VAULT_SIZE` / `BLOCK_SIZE`)
 pub const MAX_TOTAL_BLOCKS: u64 = MAX_VAULT_SIZE / (BLOCK_SIZE as u64);
 
@@ -195,8 +198,14 @@ pub const MAX_OBJECT_PAYLOAD: usize =
 /// Stream chunk size (1 MiB)
 pub const STREAM_CHUNK_SIZE: usize = 1024 * 1024;
 
+/// Maximum size for mlock'd SecureBuffer (2 MiB)
+pub const MAX_SECURE_BUFFER_SIZE: usize = 2 * 1024 * 1024;
+
 /// Default vault path
 pub const DEFAULT_VAULT_PATH: &str = "sandbox/vault.bbx";
+
+/// Default vault extension
+pub const DEFAULT_VAULT_EXTENSION: &str = "bbx";
 
 /// Error display message (opaque)
 pub const ERROR_DISPLAY_MSG: &str = "vault error";
@@ -242,3 +251,13 @@ const_assert!(TAG_LEN == 16);
 const_assert!(SALT_LEN == 32);
 const_assert!(VID_LEN == 16);
 const_assert!(BLOCK_SIZE == 4096);
+
+// =============================================================================
+// AAD PURPOSES
+// =============================================================================
+
+/// AAD Purpose string for Header
+pub const AAD_PURPOSE_HEADER: &[u8] = b"header";
+
+/// AAD Purpose string for Object Data
+pub const AAD_PURPOSE_OBJECT_DATA: &[u8] = b"object_data";

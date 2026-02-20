@@ -66,6 +66,11 @@ pub trait HardwareEnclave: Send + Sync {
 
     /// Get the enclave provider name for diagnostics.
     fn provider_name(&self) -> &'static str;
+
+    /// Permanently delete the hardware-bound keys generated for this enclave.
+    /// This is an irreversible operation and will make all vaults relying on
+    /// this key unrecoverable.
+    fn clear_hardware_keys(&self) -> Result<(), VaultError>;
 }
 
 // =============================================================================

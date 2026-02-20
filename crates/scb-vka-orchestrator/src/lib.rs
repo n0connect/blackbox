@@ -89,9 +89,7 @@ fn calculate_stream_sizes(data_len: u64) -> Result<(u64, u64, u64), VaultError> 
         .checked_mul(TAG_LEN as u64)
         .ok_or_else(range_err)?;
 
-    let encrypted_payload_size = data_len
-        .checked_add(tag_overhead)
-        .ok_or_else(range_err)?;
+    let encrypted_payload_size = data_len.checked_add(tag_overhead).ok_or_else(range_err)?;
 
     let total_size = (WRAPPED_DEK_SIZE as u64)
         .checked_add(NONCE_LEN as u64)
@@ -211,6 +209,9 @@ pub trait VaultManager {
 
     /// Physically shrink vault by permanently dropping deleted objects out-of-place.
     fn vacuum_vault(&self, session: VaultSession, path: &Path) -> Result<(), VaultError>;
+
+    /// Erase all hardware-bound cryptographic keys (e.g., Secure Enclave, TPM) from the system.
+    fn clear_hardware_keys(&self) -> Result<(), VaultError>;
 }
 
 // =============================================================================
@@ -255,8 +256,7 @@ impl DefaultVaultManager {
     }
 
     fn commit_header(&self, session: &mut VaultSession) -> Result<(), VaultError> {
-        let entry_count =
-            u32::try_from(session.file_table.len()).map_err(|_| capacity_err())?;
+        let entry_count = u32::try_from(session.file_table.len()).map_err(|_| capacity_err())?;
         session.header.update_entry_count(entry_count);
         session.header.increment_epoch()?;
 
@@ -286,8 +286,12 @@ impl DefaultVaultManager {
         let mut lock = VaultLock::acquire(path)?;
 
         let mut sb_bytes = [0u8; SUPERBLOCK_SIZE];
-        lock.file_mut().seek(SeekFrom::Start(0)).map_err(|_| io_err())?;
-        lock.file_mut().read_exact(&mut sb_bytes).map_err(|_| io_err())?;
+        lock.file_mut()
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| io_err())?;
+        lock.file_mut()
+            .read_exact(&mut sb_bytes)
+            .map_err(|_| io_err())?;
 
         let superblock = Superblock::parse(&sb_bytes[..])?;
 
@@ -398,7 +402,8 @@ impl VaultManager for DefaultVaultManager {
         let superblock = Superblock::new(salt, vid, timestamp, total_blocks);
 
         file.seek(SeekFrom::Start(0)).map_err(|_| io_err())?;
-        file.write_all(superblock.as_bytes()).map_err(|_| io_err())?;
+        file.write_all(superblock.as_bytes())
+            .map_err(|_| io_err())?;
 
         let mut header = VaultHeader::new(CRYPTO_VERSION, 1);
 
@@ -438,7 +443,9 @@ impl VaultManager for DefaultVaultManager {
                     error!("Vault unlock failed: incorrect password or corrupted vault");
                 }
                 VaultErrorKind::IntegrityError => {
-                    error!("Vault unlock failed: data integrity check failed - vault may be corrupted");
+                    error!(
+                        "Vault unlock failed: data integrity check failed - vault may be corrupted"
+                    );
                 }
                 VaultErrorKind::VaultBusy => {
                     error!("Vault is locked by another process");
@@ -464,6 +471,10 @@ impl VaultManager for DefaultVaultManager {
         session.header.zeroize();
         info!(vid = %hex::encode(&vid[..8]), "Vault locked - key material zeroized");
         Ok(())
+    }
+
+    fn clear_hardware_keys(&self) -> Result<(), VaultError> {
+        self.enclave.clear_hardware_keys()
     }
 
     #[instrument(skip(self, session, reader))]
@@ -517,7 +528,11 @@ impl VaultManager for DefaultVaultManager {
                 session.space_manager.expand(additional_blocks)?;
 
                 let new_len = session.space_manager.total_blocks() * (BLOCK_SIZE as u64);
-                session.lock.file_mut().set_len(new_len).map_err(|_| io_err())?;
+                session
+                    .lock
+                    .file_mut()
+                    .set_len(new_len)
+                    .map_err(|_| io_err())?;
 
                 session.space_manager.allocate(num_blocks)?
             }
@@ -525,12 +540,24 @@ impl VaultManager for DefaultVaultManager {
         };
 
         let offset = calculate_data_offset(start_block)?;
-        session.lock.file_mut().seek(SeekFrom::Start(offset)).map_err(|_| io_err())?;
+        session
+            .lock
+            .file_mut()
+            .seek(SeekFrom::Start(offset))
+            .map_err(|_| io_err())?;
 
-        session.lock.file_mut().write_all(&wrapped_dek).map_err(|_| io_err())?;
+        session
+            .lock
+            .file_mut()
+            .write_all(&wrapped_dek)
+            .map_err(|_| io_err())?;
 
         let nonce = NonceFactory::generate()?;
-        session.lock.file_mut().write_all(nonce.as_bytes()).map_err(|_| io_err())?;
+        session
+            .lock
+            .file_mut()
+            .write_all(nonce.as_bytes())
+            .map_err(|_| io_err())?;
 
         let consumed = ConsumedNonce::new(nonce);
         let mut limited_reader = reader.take(data_len);
@@ -613,14 +640,16 @@ impl VaultManager for DefaultVaultManager {
             .purpose(AadPurpose::UserPurpose(*entry.purpose()))
             .build()?;
 
-        let dek = self.crypto.unwrap_dek(&session.kek, entry.wrapped_dek(), &aad)?;
+        let dek = self
+            .crypto
+            .unwrap_dek(&session.kek, entry.wrapped_dek(), &aad)?;
 
-        let offset = calculate_data_offset(entry.start_block() as u64)
-            .map_err(|_| integrity_err())?;
+        let offset =
+            calculate_data_offset(entry.start_block() as u64).map_err(|_| integrity_err())?;
 
         let data_len = entry.size();
-        let (encrypted_payload_size, _, _) = calculate_stream_sizes(data_len)
-            .map_err(|_| integrity_err())?;
+        let (encrypted_payload_size, _, _) =
+            calculate_stream_sizes(data_len).map_err(|_| integrity_err())?;
 
         let stream_read_size = encrypted_payload_size
             .checked_add(MAC_LEN as u64)
@@ -633,7 +662,11 @@ impl VaultManager for DefaultVaultManager {
             .map_err(|_| io_err())?;
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
-        session.lock.file_mut().read_exact(&mut nonce_bytes).map_err(|_| io_err())?;
+        session
+            .lock
+            .file_mut()
+            .read_exact(&mut nonce_bytes)
+            .map_err(|_| io_err())?;
 
         let nonce = Nonce::new(nonce_bytes);
         let mut limited_reader = (session.lock.file_mut()).take(stream_read_size);
@@ -731,15 +764,23 @@ impl VaultManager for DefaultVaultManager {
         let mut temp_file = options.open(temp_path).map_err(|_| io_err())?;
 
         // 1. Copy Superblock verbatim
-        session.lock.file_mut().seek(SeekFrom::Start(0)).map_err(|_| io_err())?;
+        session
+            .lock
+            .file_mut()
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| io_err())?;
         let mut superblock_buf = [0u8; scb_vka_io::layout::SUPERBLOCK_SIZE];
-        session.lock.file_mut().read_exact(&mut superblock_buf).map_err(|_| io_err())?;
+        session
+            .lock
+            .file_mut()
+            .read_exact(&mut superblock_buf)
+            .map_err(|_| io_err())?;
         temp_file.write_all(&superblock_buf).map_err(|_| io_err())?;
 
         // 2. Out-of-place Block Copy
         session.file_table.sort_by_key(|e| e.start_block());
-        let mut next_free_block = 0u64;
-        let mut buf = vec![0u8; 8 * 1024 * 1024]; // 8MB buffer
+        let mut next_free_block = scb_vka_io::manager::RESERVED_BLOCKS;
+        let mut buf = vec![0u8; scb_vka_common::config::VACUUM_BUFFER_SIZE];
 
         let total_objects = session.file_table.len();
         for (idx, entry) in session.file_table.iter_mut().enumerate() {
@@ -752,8 +793,14 @@ impl VaultManager for DefaultVaultManager {
             let src_offset = calculate_data_offset(src_block)?;
             let dst_offset = calculate_data_offset(next_free_block)?;
 
-            session.lock.file_mut().seek(SeekFrom::Start(src_offset)).map_err(|_| io_err())?;
-            temp_file.seek(SeekFrom::Start(dst_offset)).map_err(|_| io_err())?;
+            session
+                .lock
+                .file_mut()
+                .seek(SeekFrom::Start(src_offset))
+                .map_err(|_| io_err())?;
+            temp_file
+                .seek(SeekFrom::Start(dst_offset))
+                .map_err(|_| io_err())?;
 
             let mut remaining = byte_len;
             let mut reader = session.lock.file_mut().take(remaining as u64);
@@ -780,8 +827,8 @@ impl VaultManager for DefaultVaultManager {
         // 3. Rebuild SpaceManager
         let new_total_blocks = std::cmp::max(next_free_block, MIN_TOTAL_BLOCKS);
         let mut new_sm = SpaceManager::new(new_total_blocks)?;
-        if next_free_block > 0 {
-            new_sm.allocate(next_free_block)?;
+        if next_free_block > scb_vka_io::manager::RESERVED_BLOCKS {
+            new_sm.allocate(next_free_block - scb_vka_io::manager::RESERVED_BLOCKS)?;
         }
 
         // 4. Update Header State
@@ -862,7 +909,10 @@ fn write_encrypted_header(
 
     // Early size validation to prevent DoS via memory exhaustion
     let header_struct_size = std::mem::size_of::<VaultHeader>();
-    let entries_size = file_table.len().checked_mul(FILE_ENTRY_SIZE).ok_or_else(capacity_err)?;
+    let entries_size = file_table
+        .len()
+        .checked_mul(FILE_ENTRY_SIZE)
+        .ok_or_else(capacity_err)?;
     let plaintext_size = header_struct_size
         .checked_add(bitmap.len())
         .and_then(|x| x.checked_add(entries_size))
@@ -896,8 +946,10 @@ fn write_encrypted_header(
 
     let mac = crypto.compute_header_mac(mk, &blob)?;
 
-    file.seek(SeekFrom::Start(slot_offset)).map_err(|_| io_err())?;
-    file.write_all(&(blob_size as u64).to_le_bytes()).map_err(|_| io_err())?;
+    file.seek(SeekFrom::Start(slot_offset))
+        .map_err(|_| io_err())?;
+    file.write_all(&(blob_size as u64).to_le_bytes())
+        .map_err(|_| io_err())?;
     file.write_all(&mac).map_err(|_| io_err())?;
     file.write_all(&blob).map_err(|_| io_err())?;
 
@@ -915,7 +967,8 @@ fn try_read_slot(
     crypto: &DefaultCryptoEngine,
     superblock: &Superblock,
 ) -> Result<(VaultHeader, Vec<FileTableEntry>, SpaceManager), VaultError> {
-    file.seek(SeekFrom::Start(slot_offset)).map_err(|_| io_err())?;
+    file.seek(SeekFrom::Start(slot_offset))
+        .map_err(|_| io_err())?;
 
     let mut size_bytes = [0u8; 8];
     file.read_exact(&mut size_bytes).map_err(|_| io_err())?;
@@ -949,9 +1002,7 @@ fn try_read_slot(
     let dek = crypto.unwrap_dek(kek, &wrapped_dek, &aad)?;
     let rest = &blob[WRAPPED_DEK_SIZE..];
 
-    let nonce: [u8; NONCE_LEN] = rest[..NONCE_LEN]
-        .try_into()
-        .map_err(|_| integrity_err())?;
+    let nonce: [u8; NONCE_LEN] = rest[..NONCE_LEN].try_into().map_err(|_| integrity_err())?;
 
     let ct_end = rest.len() - TAG_LEN;
     let ct = &rest[NONCE_LEN..ct_end];
@@ -987,7 +1038,9 @@ fn try_read_slot(
     let expected_entries_size = (header.entry_count() as usize)
         .checked_mul(FILE_ENTRY_SIZE)
         .ok_or_else(integrity_err)?;
-    let required_size = offset.checked_add(expected_entries_size).ok_or_else(integrity_err)?;
+    let required_size = offset
+        .checked_add(expected_entries_size)
+        .ok_or_else(integrity_err)?;
     if pt.len() < required_size {
         return Err(integrity_err());
     }
@@ -1017,10 +1070,14 @@ fn read_encrypted_header(
 
     match (&slot_a, &slot_b) {
         (Ok(_), Err(_)) => {
-            warn!("Header slot B is corrupted - using slot A (vault may have crashed during write)");
+            warn!(
+                "Header slot B is corrupted - using slot A (vault may have crashed during write)"
+            );
         }
         (Err(_), Ok(_)) => {
-            warn!("Header slot A is corrupted - using slot B (vault may have crashed during write)");
+            warn!(
+                "Header slot A is corrupted - using slot B (vault may have crashed during write)"
+            );
         }
         _ => {}
     }

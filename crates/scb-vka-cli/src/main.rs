@@ -25,7 +25,7 @@ use zeroize::Zeroizing;
 
 use scb_vka_orchestrator::{DefaultVaultManager, VaultManager, VaultSession};
 
-const DEFAULT_VAULT_PATH: &str = "sandbox/vault.bbx";
+const DEFAULT_VAULT_PATH: &str = scb_vka_common::config::DEFAULT_VAULT_PATH;
 
 // =============================================================================
 // CLI DEFINITION
@@ -47,8 +47,11 @@ struct Cli {
     #[arg(long, short = 'v', global = true, action = clap::ArgAction::Count)]
     verbose: u8,
 
+    #[arg(long = "CLEANHWKEYS")]
+    cleanhwkeys: bool,
+
     #[command(subcommand)]
-    cmd: Commands,
+    cmd: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -190,7 +193,7 @@ fn cmd_create(manager: &DefaultVaultManager, path: &PathBuf, quiet: bool) -> Res
     if !quiet {
         info!("Creating vault at {}", path.display());
     }
-    info!("Deriving keys (requires ~1GB RAM, please wait)...");
+    info!("Deriving keys (It may take time, requires ~1GB RAM, please wait)...");
 
     let vault_info = manager
         .create_vault(path, password.as_bytes())
@@ -219,7 +222,10 @@ fn cmd_add(
     let (mut reader, len): (Box<dyn IoRead>, u64) = match (file, data) {
         (Some(f), _) => {
             let file = std::fs::File::open(&f).context("Failed to open source file")?;
-            let len = file.metadata().context("Failed to read file metadata")?.len();
+            let len = file
+                .metadata()
+                .context("Failed to read file metadata")?
+                .len();
             debug!("Reading from file: {} ({} bytes)", f.display(), len);
             (Box::new(file), len)
         }
@@ -393,6 +399,28 @@ fn run() -> Result<()> {
 
     let manager = DefaultVaultManager::new();
 
+    if cli.cleanhwkeys {
+        if !cli.quiet {
+            eprintln!(
+                "{}",
+                "WARNING: This will permanently delete the hardware keys."
+                    .red()
+                    .bold()
+            );
+            eprintln!(
+                "{}",
+                "All vaults relying on this hardware will become unrecoverable."
+                    .red()
+                    .bold()
+            );
+        }
+        manager
+            .clear_hardware_keys()
+            .context("Failed to clear hardware keys")?;
+        info!("Hardware keys successfully cleaned.");
+        return Ok(());
+    }
+
     let path = cli
         .vault
         .clone()
@@ -400,24 +428,30 @@ fn run() -> Result<()> {
 
     let quiet = cli.quiet;
 
-    match cli.cmd {
-        Commands::Create => cmd_create(&manager, &path, quiet),
-        Commands::Add {
-            type_name,
-            purpose,
-            data,
-            file,
-        } => cmd_add(&manager, &path, type_name, purpose, data, file, quiet),
-        Commands::Read { id, output } => cmd_read(&manager, &path, id, output, quiet),
-        Commands::List => cmd_list(&manager, &path, quiet),
-        Commands::Delete { id } => cmd_delete(&manager, &path, id, quiet),
-        Commands::Vacuum => cmd_vacuum(&manager, &path, quiet),
-        Commands::Shell => cmd_shell(manager, &path, quiet),
+    if let Some(cmd) = cli.cmd {
+        match cmd {
+            Commands::Create => cmd_create(&manager, &path, quiet),
+            Commands::Add {
+                type_name,
+                purpose,
+                data,
+                file,
+            } => cmd_add(&manager, &path, type_name, purpose, data, file, quiet),
+            Commands::Read { id, output } => cmd_read(&manager, &path, id, output, quiet),
+            Commands::List => cmd_list(&manager, &path, quiet),
+            Commands::Delete { id } => cmd_delete(&manager, &path, id, quiet),
+            Commands::Vacuum => cmd_vacuum(&manager, &path, quiet),
+            Commands::Shell => cmd_shell(manager, &path, quiet),
+        }
+    } else {
+        // Fallback if no command provided (useful if only running flags like --CLEANHWKEYS is expected)
+        println!("No command specificed. Use --help for usage.");
+        Ok(())
     }
 }
 
 fn main() {
-    println!("{}", "BlackBox CLI v2.0".bright_white().bold());
+    println!("{}", "BlackBox CLI".bright_white().bold());
 
     if let Err(e) = run() {
         // Print user-friendly error message (not full debug chain)

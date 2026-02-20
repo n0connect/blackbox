@@ -50,8 +50,8 @@ impl AadPurpose {
     #[must_use]
     pub fn as_bytes(&self) -> Vec<u8> {
         match self {
-            AadPurpose::Header => b"header".to_vec(),
-            AadPurpose::ObjectData => b"object_data".to_vec(),
+            AadPurpose::Header => scb_vka_common::config::AAD_PURPOSE_HEADER.to_vec(),
+            AadPurpose::ObjectData => scb_vka_common::config::AAD_PURPOSE_OBJECT_DATA.to_vec(),
             AadPurpose::UserPurpose(bytes) => {
                 let len = bytes.iter().position(|&c| c == 0).unwrap_or(32);
                 if len == 0 {
@@ -634,12 +634,23 @@ impl CryptoEngine for DefaultCryptoEngine {
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
 
         loop {
-            let n = reader
-                .read(buffer.as_mut_slice())
-                .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
-            if n == 0 {
+            let mut read_count = 0;
+            let expected_read = scb_vka_common::config::STREAM_CHUNK_SIZE;
+            while read_count < expected_read {
+                let n = reader
+                    .read(&mut buffer.as_mut_slice()[read_count..expected_read])
+                    .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+                if n == 0 {
+                    break;
+                }
+                read_count += n;
+            }
+
+            if read_count == 0 {
                 break;
             }
+
+            let plaintext_chunk = &buffer.as_mut_slice()[..read_count];
 
             // Deterministic Nonce: Base + ChunkIndex (Little Endian increment on last 8 bytes)
             let mut nonce_bytes = *base_nonce_bytes;
@@ -659,7 +670,7 @@ impl CryptoEngine for DefaultCryptoEngine {
             // Safe because we increment nonce per chunk.
             let consumed = ConsumedNonce(nonce);
 
-            let (ct, tag) = self.encrypt_object(dek, &buffer.as_mut_slice()[..n], aad, consumed)?;
+            let (ct, tag) = self.encrypt_object(dek, plaintext_chunk, aad, consumed)?;
             writer
                 .write_all(&ct)
                 .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;

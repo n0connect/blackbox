@@ -118,13 +118,13 @@ pub struct SecureBuffer {
 }
 
 impl SecureBuffer {
-    /// Maximum buffer size: 2 MiB (allows for 1 MiB chunk + overhead)
-    pub const MAX_SIZE: usize = 2 * 1024 * 1024;
+    /// Maximum allowed allocation (to prevent locking too much unswappable RAM)
+    pub const MAX_SIZE: usize = scb_vka_common::config::MAX_SECURE_BUFFER_SIZE;
 
     /// Create a new secure buffer of specified size.
     ///
     /// # Errors
-    /// - `ParameterOutOfRange`: Size exceeds MAX_SIZE (2 MiB)
+    /// - `ParameterOutOfRange`: Size exceeds MAX_SIZE
     /// - `OperationFailed`: mlock failed (insufficient privileges or limits)
     pub fn new(size: usize) -> Result<Self, VaultError> {
         if size > Self::MAX_SIZE {
