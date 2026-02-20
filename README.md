@@ -3,7 +3,7 @@
 ![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)
 ![Shell](https://img.shields.io/badge/Shell-121011?style=for-the-badge&logo=gnu-bash&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-informational?style=for-the-badge)
-![License](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue?style=for-the-badge)
+![License](https://img.shields.io/badge/License-Apache--2.0-blue?style=for-the-badge)
 
 BlackBox is a Zero-Trust, Layered Security vault system designed for extreme data protection. It employs a 512-bit Cryptographic Pipeline, Hardware Security Binding, Memory Hardening, and Streaming I/O to ensure data confidentiality and integrity.
 
