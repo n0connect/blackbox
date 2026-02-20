@@ -188,7 +188,7 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 │                     │  │         HARDWARE ENCLAVE                │     │
 │                     │  │  ┌─────────────────────────────────┐    │     │
 │                     └──┼─▶│  TPM 2.0: HMAC(HW_KEY, UR)      │    │     │
-│                        │  │  Enclave: Bind(PK, UR)          │    │     │
+│                        │  │  Enclave: ECDH(HW_KEY, H2C(UR)) │    │     │
 │                        │  │  ─────────────────────────────  │    │     │
 │                        │  │  Key NEVER leaves the chip!     │    │     │
 │                        │  └───────────────┬─────────────────┘    │     │
@@ -246,17 +246,31 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 │  │                         macOS                                    │   │
 │  │  ┌───────────────────────────────────────────────────────────┐  │   │
 │  │  │                    SECURE ENCLAVE                          │  │   │
-│  │  │  ┌─────────────────┐    ┌──────────────────────────────┐  │  │   │
-│  │  │  │  P-256 Private  │    │  SecKeyCopyPublicKey()       │  │  │   │
-│  │  │  │     Key         │───▶│  Export public key (65 B)    │  │  │   │
-│  │  │  │  (non-export)   │    └──────────────┬───────────────┘  │  │   │
-│  │  │  └─────────────────┘                   │                   │  │   │
-│  │  └────────────────────────────────────────┼───────────────────┘  │   │
+│  │  │                                                             │  │   │
+│  │  │    UR (64 bytes)                                           │  │   │
+│  │  │         │                                                   │  │   │
+│  │  │         ▼                                                   │  │   │
+│  │  │  ┌─────────────────────────────────────────────────────┐   │  │   │
+│  │  │  │  hash-to-curve (RFC 9380 SSWU)                      │   │  │   │
+│  │  │  │  UR → Valid P-256 point (deterministic)             │   │  │   │
+│  │  │  └───────────────────────┬─────────────────────────────┘   │  │   │
+│  │  │                          │                                  │  │   │
+│  │  │                          ▼ Peer Public Key                  │  │   │
+│  │  │  ┌─────────────────┐    ┌──────────────────────────────┐   │  │   │
+│  │  │  │  P-256 Private  │───▶│  ECDH Key Agreement          │   │  │   │
+│  │  │  │     Key         │    │  SecKeyCopyKeyExchangeResult │   │  │   │
+│  │  │  │  (non-export)   │    │  ─────────────────────────── │   │  │   │
+│  │  │  │                 │    │  Computed INSIDE the chip!   │   │  │   │
+│  │  │  └─────────────────┘    └──────────────┬───────────────┘   │  │   │
+│  │  │                                        │                    │  │   │
+│  │  └────────────────────────────────────────┼────────────────────┘  │   │
 │  │                                           │                       │   │
-│  │       MR = SHA3-512(PK || SHA256(UR))◄────┘                      │   │
+│  │       MR = SHA3-512(shared_secret)◄───────┘                      │   │
 │  │                                                                   │   │
-│  │  ✓ Different Mac = Different PK = Different MR                  │   │
-│  │  ✓ Vault is machine-bound                                        │   │
+│  │  ✓ Private key NEVER leaves the Secure Enclave                  │   │
+│  │  ✓ ECDH computed INSIDE the chip (same as TPM HMAC)             │   │
+│  │  ✓ Deterministic: same UR = same P-256 point = same MR          │   │
+│  │  ✓ Equivalent security level to TPM 2.0 HMAC                    │   │
 │  └───────────────────────────────────────────────────────────────────┘   │
 │                                                                         │
 │  ┌─────────────────────────────────────────────────────────────────┐   │
@@ -279,6 +293,59 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 │  ┌───────────────────────────────────────────────────────────────────┐ │
 │  │  Unsupported Platform → COMPILE ERROR (no mock/fallback)          │ │
 │  └───────────────────────────────────────────────────────────────────┘ │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Security Equivalence: macOS vs TPM
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│              EQUIVALENT SECURITY MODEL (Both Platforms)                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌────────────────────────────┬────────────────────────────────────┐  │
+│   │         TPM 2.0            │     Apple Secure Enclave           │  │
+│   ├────────────────────────────┼────────────────────────────────────┤  │
+│   │                            │                                     │  │
+│   │  UR ──────────────────▶    │  UR ──────────────────▶            │  │
+│   │        │                   │        │                            │  │
+│   │        ▼                   │        ▼                            │  │
+│   │  ╔═══════════════════╗     │  ┌─────────────────────┐           │  │
+│   │  ║    TPM CHIP       ║     │  │  hash-to-curve      │           │  │
+│   │  ║  ┌─────────────┐  ║     │  │  (RFC 9380 SSWU)    │           │  │
+│   │  ║  │  HMAC-256   │  ║     │  └──────────┬──────────┘           │  │
+│   │  ║  │  (HW_KEY)   │  ║     │             │                      │  │
+│   │  ║  └─────────────┘  ║     │             ▼                      │  │
+│   │  ╚════════╤══════════╝     │  ╔═══════════════════════╗         │  │
+│   │           │                │  ║   SECURE ENCLAVE      ║         │  │
+│   │           ▼                │  ║  ┌─────────────────┐  ║         │  │
+│   │    32-byte result          │  ║  │  ECDH (HW_KEY)  │  ║         │  │
+│   │           │                │  ║  └────────┬────────┘  ║         │  │
+│   │           ▼                │  ╚═══════════╪═══════════╝         │  │
+│   │    SHA3-512 expand         │              │                     │  │
+│   │           │                │              ▼                     │  │
+│   │           ▼                │       32-byte shared secret        │  │
+│   │     MR (64 bytes)          │              │                     │  │
+│   │                            │              ▼                     │  │
+│   │                            │       SHA3-512 expand              │  │
+│   │                            │              │                     │  │
+│   │                            │              ▼                     │  │
+│   │                            │        MR (64 bytes)               │  │
+│   ├────────────────────────────┼────────────────────────────────────┤  │
+│   │  ✓ Operation INSIDE chip   │  ✓ Operation INSIDE chip          │  │
+│   │  ✓ HW_KEY never exported   │  ✓ HW_KEY never exported          │  │
+│   │  ✓ Deterministic result    │  ✓ Deterministic result           │  │
+│   │  ✓ Requires physical chip  │  ✓ Requires physical chip         │  │
+│   └────────────────────────────┴────────────────────────────────────┘  │
+│                                                                         │
+│   Attack Surface Analysis:                                              │
+│   ┌─────────────────────────────────────────────────────────────────┐  │
+│   │  Without physical chip access:                                   │  │
+│   │  • Attacker has: Password, Salt, UR (from memory dump)          │  │
+│   │  • Attacker needs: HW_KEY (inside chip)                         │  │
+│   │  • Result: CANNOT compute MR → CANNOT derive KEK → NO DECRYPT   │  │
+│   └─────────────────────────────────────────────────────────────────┘  │
 │                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -558,6 +625,8 @@ See LICENSE file.
 | HMAC-SHA3-512 | Key fusion (Master Root, Context Root) | FIPS 198-1 — "The Keyed-Hash Message Authentication Code" with SHA-3 (FIPS 202) |
 | HMAC-SHA3-256 | Header MAC, Stream Integrity MAC | FIPS 198-1 with SHA-3 (FIPS 202) |
 | SHA-3 (Keccak) | Hash family underlying HMAC and HKDF operations | FIPS 202 — "SHA-3 Standard: Permutation-Based Hash and Extendable-Output Functions" |
+| Hash-to-Curve | Convert UR to P-256 point (macOS Secure Enclave ECDH) | RFC 9380 — "Hashing to Elliptic Curves" (SSWU method for P-256) |
+| ECDH | Key agreement inside Secure Enclave (macOS) | SEC 1 v2.0 — "Elliptic Curve Cryptography"; NIST SP 800-56A Rev. 3 |
 
 ### Security Standards
 
@@ -592,4 +661,6 @@ See LICENSE file.
 | aead | 0.5 | AEAD trait abstraction |
 | getrandom | 0.2 | OS-level CSPRNG |
 | tss-esapi | 7.5 | TPM 2.0 integration (Linux/Windows) |
-| security-framework | 2.11 | macOS Security.framework bindings |
+| security-framework | 2.11 | macOS Security.framework bindings (Secure Enclave ECDH) |
+| p256 | 0.13 | P-256 elliptic curve (hash-to-curve, ECDH) |
+| elliptic-curve | 0.13 | Elliptic curve traits (hash2curve feature) |
