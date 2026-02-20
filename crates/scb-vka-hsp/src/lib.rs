@@ -1,112 +1,162 @@
 //! # scb-vka-hsp
 //!
-//! Real Hardware Security Provider implementations.
+//! Hardware Security Provider - Native hardware enclave integrations.
 //!
-//! Platform support:
-//! - macOS: Hardware UUID + Keychain
-//! - Linux: TPM 2.0 (requires tpm-linux feature) or Machine ID
-//! - Windows: TPM 2.0 (requires tpm-windows feature) or Machine GUID
+//! ## Platform Support
 //!
-//! ## Usage
-//!
-//! This module is NOT integrated into the main project.
-//! It serves as a reference implementation for production deployments.
+//! | Platform | Hardware | Implementation |
+//! |----------|----------|----------------|
+//! | macOS    | Secure Enclave (T2/M1/M2/M3) | P-256 ECDSA signing |
+//! | Linux    | TPM 2.0 | HMAC-SHA256 |
+//! | Windows  | TPM 2.0 (TBS) | HMAC-SHA256 |
 //!
 //! ## Security Model
 //!
-//! The HSP provides a 32-byte machine-bound secret that:
-//! - Is derived from hardware identifiers unique to this machine
-//! - Is stored securely in OS credential storage
-//! - Is consistent across reboots
-//! - Cannot be easily transferred to another machine
+//! The enclave acts as a physical gatekeeper in the key derivation chain:
+//!
+//! ```text
+//! Password + Salt → Argon2id → UR (User Root)
+//!                               ↓
+//!                    ╔═══════════════════════╗
+//!                    ║   HARDWARE ENCLAVE    ║
+//!                    ║  UR + HW_KEY → MR     ║  ← Single visit
+//!                    ║  (key never exported) ║
+//!                    ╚═══════════════════════╝
+//!                               ↓
+//!                 MR + Context → CR → KEK/MK/CK
+//! ```
+//!
+//! - The User Root (UR) derived from Argon2id is sent to the enclave
+//! - The enclave combines UR with its non-exportable hardware key
+//! - The resulting Master Root (MR) is returned
+//! - The hardware key NEVER leaves the physical chip
+//! - The chip is visited exactly ONCE per unlock operation
+//!
+//! ## Compile-Time Platform Enforcement
+//!
+//! This crate requires physical hardware security:
+//! - macOS: Secure Enclave (T2 chip or Apple Silicon)
+//! - Linux/Windows: TPM 2.0 module
+//!
+//! Compilation will fail on unsupported platforms.
 
 #![deny(clippy::all)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use scb_vka_common::error::VaultError;
-use sha2::{Sha256, Digest};
-use zeroize::Zeroizing;
 
-/// Hardware Security Provider trait
-pub trait HardwareSecurityProvider: Send + Sync {
-    /// Retrieve the machine-bound secret (32 bytes).
+/// Hardware Security Enclave trait
+///
+/// Implementations provide hardware-bound cryptographic operations
+/// where the key material never leaves the physical security chip.
+pub trait HardwareEnclave: Send + Sync {
+    /// Sign (or HMAC) the User Root using the non-exportable hardware key.
     ///
-    /// This secret is derived from hardware-protected keys and is:
-    /// - Unique to this machine
-    /// - Protected by secure storage
-    /// - Consistent across reboots
-    fn get_machine_secret(&self) -> Result<[u8; 32], VaultError>;
+    /// # Arguments
+    /// * `ur` - The 64-byte User Root derived via Argon2id from password and salt
+    ///
+    /// # Returns
+    /// The 64-byte Master Root (MR), which is the UR transformed by the hardware key.
+    ///
+    /// # Security Guarantees
+    /// - The hardware key NEVER leaves the chip
+    /// - The operation is performed entirely within the secure enclave
+    /// - Only the result (MR) is returned to software
+    fn sign_with_hardware_key(&self, ur: &[u8; 64]) -> Result<[u8; 64], VaultError>;
 
-    /// Check if hardware security is available on this platform.
-    fn is_available(&self) -> bool;
-
-    /// Get provider name for diagnostics.
+    /// Get the enclave provider name for diagnostics.
     fn provider_name(&self) -> &'static str;
 }
 
-// Platform-specific implementations
+// =============================================================================
+// PLATFORM-SPECIFIC IMPLEMENTATIONS
+// =============================================================================
+
+// macOS: Apple Secure Enclave (T2/M1/M2/M3)
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::MacOSHSP;
+pub use macos::MacOSEnclave;
 
-#[cfg(target_os = "linux")]
-mod linux;
-#[cfg(target_os = "linux")]
-pub use linux::LinuxHSP;
+// Linux & Windows: TPM 2.0
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod tpm;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub use tpm::TpmEnclave;
 
-#[cfg(target_os = "windows")]
-mod windows;
-#[cfg(target_os = "windows")]
-pub use self::windows::WindowsHSP;
+// =============================================================================
+// COMPILE-TIME PLATFORM ENFORCEMENT
+// =============================================================================
 
-/// Select the best available HSP for the current platform.
-pub fn create_platform_hsp() -> Box<dyn HardwareSecurityProvider> {
+// Fail compilation on unsupported platforms
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+compile_error!(
+    "scb-vka-hsp requires hardware security support. \
+    Supported platforms: macOS (Secure Enclave), Linux (TPM 2.0), Windows (TPM 2.0). \
+    Your platform is not supported."
+);
+
+// =============================================================================
+// FACTORY FUNCTION
+// =============================================================================
+
+/// Create the appropriate hardware enclave for the current platform.
+///
+/// # Platform Selection
+/// - macOS: Apple Secure Enclave (SEP)
+/// - Linux: TPM 2.0 via /dev/tpmrm0
+/// - Windows: TPM 2.0 via TBS
+///
+/// # Panics
+/// This function cannot fail at compile time on supported platforms.
+/// Runtime errors (e.g., TPM not present) are returned when using the enclave.
+pub fn create_platform_enclave() -> Box<dyn HardwareEnclave> {
     #[cfg(target_os = "macos")]
     {
-        Box::new(MacOSHSP::new())
+        Box::new(MacOSEnclave::new())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
-        Box::new(LinuxHSP::new())
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        Box::new(WindowsHSP::new())
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        compile_error!("Unsupported platform for HSP")
+        Box::new(TpmEnclave::new())
     }
 }
 
-/// Derive a deterministic secret from hardware identity.
-/// Used internally by HSP implementations.
-pub(crate) fn derive_secret(hardware_id: &[u8], context: &[u8]) -> Zeroizing<[u8; 32]> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"BLACKBOX_HSP_V1:");
-    hasher.update(hardware_id);
-    hasher.update(b":");
-    hasher.update(context);
+/// Check if hardware security is available on this system.
+///
+/// # Returns
+/// - `Ok(provider_name)` if hardware security is available
+/// - `Err(VaultError)` if hardware security is not available
+///
+/// This performs a lightweight probe without creating persistent keys.
+pub fn probe_hardware_security() -> Result<&'static str, VaultError> {
+    let enclave = create_platform_enclave();
 
-    let result = hasher.finalize();
-    let mut secret = Zeroizing::new([0u8; 32]);
-    secret.copy_from_slice(&result);
-    secret
+    // Try a dummy operation to verify hardware is present
+    // This will fail fast if TPM/Secure Enclave is not available
+    let test_ur = [0u8; 64];
+    enclave.sign_with_hardware_key(&test_ur)?;
+
+    Ok(enclave.provider_name())
 }
 
-/// Combine multiple identifiers into a single hardware fingerprint.
-pub(crate) fn combine_identifiers(ids: &[&[u8]]) -> Zeroizing<[u8; 32]> {
-    let mut hasher = Sha256::new();
-    hasher.update(b"BLACKBOX_HWID_V1:");
-    for (i, id) in ids.iter().enumerate() {
-        hasher.update(&[i as u8]);
-        hasher.update(id);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_enclave_creation() {
+        // This should compile and create the appropriate enclave
+        let enclave = create_platform_enclave();
+        let name = enclave.provider_name();
+        assert!(!name.is_empty());
     }
-    let result = hasher.finalize();
-    let mut output = Zeroizing::new([0u8; 32]);
-    output.copy_from_slice(&result);
-    output
+
+    #[test]
+    #[ignore = "Requires physical hardware (TPM 2.0 or Secure Enclave)"]
+    fn test_hardware_probe() {
+        let result = probe_hardware_security();
+        assert!(result.is_ok(), "Hardware security should be available");
+        println!("Provider: {}", result.unwrap());
+    }
 }

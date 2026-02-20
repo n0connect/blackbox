@@ -8,8 +8,8 @@
 //! - Invariant Checks
 //! - Opaque IO Layout
 
-#[cfg(not(feature = "mock-hsp"))]
-compile_error!("CRITICAL: Production builds MUST NOT use MockHSP. Provide a real HSP implementation or enable 'mock-hsp' for dev.");
+// Strict Type System (`Key<Role>`, `Epoch`, `ObjectId`, `CryptoVersion`, `Nonce`)
+// Strict AAD Builder (`AadPurpose`)
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -27,7 +27,6 @@ use scb_vka_crypto::engine::{
     AadBuilder, AadPurpose, ConsumedNonce, DefaultCryptoEngine, KdfParams, NonceFactory,
 };
 use scb_vka_crypto::{CryptoEngine, CryptoVersion, Epoch, KeyKEK, KeyMK, Nonce, ObjectId};
-use scb_vka_io::hsp::{HardwareSecurityProvider, MockHSP};
 use scb_vka_io::layout::{FileTableEntry, Superblock, VaultHeader, FILE_ENTRY_SIZE};
 use scb_vka_io::lock::VaultLock;
 use scb_vka_io::manager::SpaceManager;
@@ -106,7 +105,7 @@ pub trait VaultManager {
 // =============================================================================
 
 pub struct DefaultVaultManager<L> {
-    hsp: MockHSP,
+    enclave: Box<dyn scb_vka_hsp::HardwareEnclave>,
     logger: L,
     crypto: DefaultCryptoEngine,
 }
@@ -120,7 +119,7 @@ where
         let _ = scb_vka_memory::disable_core_dumps();
 
         Self {
-            hsp: MockHSP::new(),
+            enclave: scb_vka_hsp::create_platform_enclave(),
             logger,
             crypto: DefaultCryptoEngine,
         }
@@ -146,12 +145,10 @@ where
             iterations: KDF_ITERATIONS_MIN,
             parallelism: KDF_PARALLELISM,
         };
-        let machine_secret = self.hsp.get_machine_secret()?;
-
         let (kek, mk, _ck) = self.crypto.derive_root_keys(
             password,
             superblock.salt(),
-            &machine_secret,
+            &*self.enclave,
             superblock.vid(),
             superblock.created_timestamp(),
             &kdf_params,
@@ -205,12 +202,10 @@ where
             iterations: KDF_ITERATIONS_MIN,
             parallelism: KDF_PARALLELISM,
         };
-        let machine_secret = self.hsp.get_machine_secret()?;
-
         let (mut kek, mut mk, mut ck) = self.crypto.derive_root_keys(
             password,
             &salt,
-            &machine_secret,
+            &*self.enclave,
             &vid,
             timestamp,
             &kdf_params,

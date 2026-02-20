@@ -17,6 +17,7 @@ subtle = "2.5"
 zeroize = { version = "1.8", features = ["derive"] }
 scb-vka-common = { path = "../scb-vka-common" }
 scb-vka-memory = { path = "../scb-vka-memory" }
+scb-vka-hsp = { path = "../scb-vka-hsp" }
 
 [features]
 # test-kdf: KDF bellek min 256 MiB (test/CI için). Açıkken validate() 256 MB kabul eder.

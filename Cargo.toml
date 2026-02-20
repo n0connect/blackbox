@@ -8,7 +8,5 @@ members = [
     "crates/scb-vka-orchestrator",
     "crates/scb-vka-cli",
     "crates/scb-vka-shell",
-]
-exclude = [
     "crates/scb-vka-hsp",
 ]

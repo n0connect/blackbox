@@ -16,14 +16,11 @@ use sha3::{Sha3_256, Sha3_512};
 use scb_vka_common::config::{
     ARGON2_MAX_ITERATIONS, ARGON2_MAX_MEMORY_KIB, ARGON2_MAX_PARALLELISM, ARGON2_MIN_ITERATIONS,
     ARGON2_MIN_MEMORY_KIB, ARGON2_MIN_PARALLELISM, ARGON2_OUTPUT_LEN, CRYPTO_VERSION,
-    CSPRNG_MAX_LEN, KEY_LEN, LABEL_CR, LABEL_LEAFS, LABEL_MR, LABEL_RR, MAC_LEN, NONCE_LEN,
-    SALT_LEN, TAG_LEN,
+    CSPRNG_MAX_LEN, KEY_LEN, LABEL_CR, LABEL_LEAFS, MAC_LEN, NONCE_LEN, SALT_LEN, TAG_LEN,
 };
 use scb_vka_common::error::{VaultError, VaultErrorKind};
 
-use crate::{
-    CryptoVersion, Epoch, KeyCK, KeyCR, KeyKEK, KeyMK, KeyMR, KeyRR, KeyUR, Nonce, ObjectId,
-};
+use crate::{CryptoVersion, Epoch, KeyCK, KeyCR, KeyKEK, KeyMK, KeyMR, KeyUR, Nonce, ObjectId};
 use scb_vka_memory::SecureBuffer;
 
 // Aliases for internal use
@@ -250,7 +247,7 @@ pub trait CryptoEngine {
         &self,
         password: &[u8],
         salt: &[u8; SALT_LEN],
-        machine_secret: &[u8; 32],
+        enclave: &dyn scb_vka_hsp::HardwareEnclave,
         vid: &[u8; 16],
         timestamp: u64,
         params: &KdfParams,
@@ -386,7 +383,7 @@ impl CryptoEngine for DefaultCryptoEngine {
         &self,
         password: &[u8],
         salt: &[u8; SALT_LEN],
-        machine_secret: &[u8; 32],
+        enclave: &dyn scb_vka_hsp::HardwareEnclave,
         vid: &[u8; 16],
         timestamp: u64,
         params: &KdfParams,
@@ -414,30 +411,18 @@ impl CryptoEngine for DefaultCryptoEngine {
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
         let ur = KeyUR::new(ur_bytes);
 
-        // 2. RR
-        let hkdf_rr = Hkdf::<Sha3_512>::new(None, machine_secret);
-        let mut rr_bytes = [0u8; 64];
-        let mut rr_info = Vec::new();
-        rr_info.extend_from_slice(LABEL_RR);
-        rr_info.extend_from_slice(&CRYPTO_VERSION.to_be_bytes());
+        // 2. MR (Hardware Enclave Signing)
+        // Send the fully hashed User Root (UR) into the physical chip.
+        // The chip uses its Non-Exportable key to sign the UR, turning it into the Master Root (MR).
+        let mr_bytes = enclave.sign_with_hardware_key(ur.as_bytes())?;
+        drop(ur); // EAGER ZEROIZE: UR's job is done. ZeroizeOnDrop wipes 64 bytes immediately.
 
-        hkdf_rr
-            .expand(&rr_info, &mut rr_bytes)
-            .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
-        let rr = KeyRR::new(rr_bytes);
-
-        // 3. MR
-        let mut fusion_mac = <HmacSha3_512 as Mac>::new_from_slice(ur.as_bytes())
-            .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
-        fusion_mac.update(rr.as_bytes());
-        fusion_mac.update(LABEL_MR);
-        fusion_mac.update(&CRYPTO_VERSION.to_be_bytes());
-        let mr_bytes: [u8; 64] = fusion_mac.finalize().into_bytes().into();
         let mr = KeyMR::new(mr_bytes);
 
-        // 4. CR
+        // 3. CR
         let mut context_mac = <HmacSha3_512 as Mac>::new_from_slice(mr.as_bytes())
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
+        drop(mr); // EAGER ZEROIZE: MR fed into HMAC, no longer needed.
 
         // Context Fusion: VID || Timestamp
         context_mac.update(vid);
@@ -447,8 +432,10 @@ impl CryptoEngine for DefaultCryptoEngine {
         let cr_bytes: [u8; 64] = context_mac.finalize().into_bytes().into();
         let cr = KeyCR::new(cr_bytes);
 
-        // 5. Leaf Keys
+        // 4. Leaf Keys
         let hkdf_leaf = Hkdf::<Sha3_512>::new(None, cr.as_bytes());
+        drop(cr); // EAGER ZEROIZE: CR fed into HKDF, no longer needed.
+
         let mut leaf_info = Vec::new();
         leaf_info.extend_from_slice(LABEL_LEAFS);
         leaf_info.extend_from_slice(&CRYPTO_VERSION.to_be_bytes());
@@ -473,9 +460,6 @@ impl CryptoEngine for DefaultCryptoEngine {
                 .try_into()
                 .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?,
         );
-
-        // ur, rr, mr, cr are dropped here — ZeroizeOnDrop handles cleanup.
-        let _ = (ur, rr, mr);
 
         Ok((kek, mk, ck))
     }

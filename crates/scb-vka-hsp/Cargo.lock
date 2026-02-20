@@ -262,9 +262,12 @@ dependencies = [
 name = "scb-vka-hsp"
 version = "1.0.0"
 dependencies = [
+ "core-foundation",
+ "core-foundation-sys",
  "getrandom",
  "scb-vka-common",
  "security-framework",
+ "security-framework-sys",
  "sha2",
  "zeroize",
 ]

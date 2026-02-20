@@ -5,7 +5,64 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-informational?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue?style=for-the-badge)
 
-BlackBox is a Zero-Trust, Layered Security vault system designed for extreme data protection. It employs a 512-bit Cryptographic Pipeline, Memory Hardening, and Streaming I/O to ensure data confidentiality and integrity without compromising system resources.
+BlackBox is a Zero-Trust, Layered Security vault system designed for extreme data protection. It employs a 512-bit Cryptographic Pipeline, Hardware Security Binding, Memory Hardening, and Streaming I/O to ensure data confidentiality and integrity.
+
+---
+
+## Quick Overview
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           BLACKBOX VAULT                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   Password ─────┐                                                       │
+│                 ▼                                                       │
+│            ┌─────────┐     ┌──────────────────┐                        │
+│   Salt ───▶│ Argon2id│────▶│ User Root (UR)   │                        │
+│            └─────────┘     └────────┬─────────┘                        │
+│                                     │                                   │
+│                                     ▼                                   │
+│                          ╔═══════════════════════╗                     │
+│                          ║   HARDWARE ENCLAVE    ║                     │
+│                          ║  ┌─────────────────┐  ║                     │
+│                          ║  │  macOS: Secure  │  ║                     │
+│                          ║  │    Enclave      │  ║                     │
+│                          ║  │  Linux: TPM 2.0 │  ║                     │
+│                          ║  │  Win:   TPM 2.0 │  ║                     │
+│                          ║  └────────┬────────┘  ║                     │
+│                          ║           │           ║                     │
+│                          ║    HW_KEY + UR → MR   ║                     │
+│                          ║   (key never leaves)  ║                     │
+│                          ╚═══════════╤═══════════╝                     │
+│                                      │                                  │
+│                                      ▼                                  │
+│                          ┌───────────────────────┐                     │
+│                          │   Master Root (MR)    │                     │
+│                          └───────────┬───────────┘                     │
+│                                      │                                  │
+│                    VID + Timestamp + │                                  │
+│                                      ▼                                  │
+│                          ┌───────────────────────┐                     │
+│                          │  Context Root (CR)    │                     │
+│                          └───────────┬───────────┘                     │
+│                                      │                                  │
+│                        HKDF-SHA3-512 │                                  │
+│                     ┌────────────────┼────────────────┐                │
+│                     ▼                ▼                ▼                │
+│              ┌──────────┐     ┌──────────┐     ┌──────────┐            │
+│              │   KEK    │     │    MK    │     │    CK    │            │
+│              │ (32 byte)│     │ (32 byte)│     │ (32 byte)│            │
+│              └────┬─────┘     └────┬─────┘     └──────────┘            │
+│                   │                │                                    │
+│                   ▼                ▼                                    │
+│            ┌────────────┐   ┌────────────┐                             │
+│            │ Wrap DEKs  │   │ Header MAC │                             │
+│            │ (per-obj)  │   │ (integrity)│                             │
+│            └────────────┘   └────────────┘                             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -13,96 +70,377 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 
 **Read before use. These limitations are inherent to the design.**
 
-1. **Crash-Resistant Design (A/B Header)**: The vault uses a dual-slot header (A/B ping-pong) to prevent corruption during unexpected power loss. If interrupted, the vault safely reverts to its last healthy state upon next unlock. No WAL is used to strictly maintain the Zero-Trust attack surface.
+1. **Crash-Resistant Design (A/B Header)**: Dual-slot header prevents corruption during power loss.
 
-2. **No Password Change**: Password cannot be changed after vault creation. To change password, create a new vault and migrate data manually.
+2. **No Password Change**: Password cannot be changed. Create a new vault to change.
 
-3. **Single Session Only**: Concurrent access from multiple processes is not supported and will corrupt the vault.
+3. **Single Session Only**: Concurrent access will corrupt the vault.
 
-4. **COW Filesystem Limitation**: On filesystems like ZFS or APFS, secure deletion tools cannot guarantee erasure of *decrypted* files due to snapshots or block copying. Note: Snapshots of the *encrypted vault file* itself pose no security risk.
+4. **COW Filesystem Limitation**: On ZFS/APFS, secure deletion cannot guarantee erasure of decrypted files.
 
-5. **Memory Constraints**: SecureBox uses mlock to prevent swapping. Systems with limited memory or strict ulimits may fail to allocate secure memory.
+5. **Memory Constraints**: SecureBox uses mlock. Systems with limited memory may fail.
 
 ---
 
 ## Key Features
 
-- **Layered Defense Strategy**: Security enforced at Kernel, Memory, Application, and Crypto levels.
-- **512-bit Native Pipeline**: All key derivations use SHA3-512 and Argon2id.
-- **Zero-Trust Architecture**: Every component assumes hostile environment.
-- **Streaming I/O**: 1 MiB chunked pipeline for constant memory usage with full-file integrity (HMAC-SHA3-256).
-- **Authenticated Storage**: XChaCha20-Poly1305 encryption with HMAC-SHA3-256 authentication.
-- **Process Hardening**: Core dumps disabled, mlock for sensitive keys, zeroize-on-drop for all key material.
-- **Cross-Platform**: Native support for Linux, macOS, and Windows with platform-specific security primitives.
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        DEFENSE IN DEPTH                                 │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐   │
+│   │   KERNEL    │  │   MEMORY    │  │  HARDWARE   │  │   CRYPTO    │   │
+│   │   LEVEL     │  │   LEVEL     │  │   LEVEL     │  │   LEVEL     │   │
+│   ├─────────────┤  ├─────────────┤  ├─────────────┤  ├─────────────┤   │
+│   │ • Core dump │  │ • mlock()   │  │ • TPM 2.0   │  │ • Argon2id  │   │
+│   │   disabled  │  │ • zeroize   │  │ • Secure    │  │ • XChaCha20 │   │
+│   │ • No debug  │  │   on drop   │  │   Enclave   │  │ • SHA3-512  │   │
+│   │ • File lock │  │ • SecureBox │  │ • HW-bound  │  │ • HKDF      │   │
+│   └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+- **512-bit Native Pipeline**: All key derivations use SHA3-512 and Argon2id
+- **Hardware Security Binding**: TPM 2.0 (Linux/Windows) or Secure Enclave (macOS)
+- **Zero-Trust Architecture**: Every component assumes hostile environment
+- **Streaming I/O**: 1 MiB chunked encryption with constant memory usage
+- **Authenticated Storage**: XChaCha20-Poly1305 + HMAC-SHA3-256
 
 ---
 
 ## Architecture Overview
 
-The system follows a strict dependency hierarchy:
-
-1. **Level 0: Kernel & Memory (scb-vka-memory)**
-   - SecureBox / SecureBuffer: Protects keys in RAM (mlock, zeroize-on-drop).
-   - Process Hardening: Disables core dumps and debugging.
-   - Secure Wipe: Multi-pass CSPRNG overwrite for deleted data.
-
-2. **Level 1: Core Logic (scb-vka-common)**
-   - Centralized Constants (Crypto versions, layout parameters, object limits).
-   - Opaque Error types (no internal state leakage).
-   - Structured Logging (VaultEvent, VaultLogger trait).
-   - Constant-time utilities (subtle crate).
-
-3. **Level 2: IO & Hardware (scb-vka-io)**
-   - Layout: Manages .bbx binary file structure (Superblock, VaultHeader, FileTableEntry).
-   - HSP: Hardware Security Provider abstraction (MockHSP for development).
-   - Lock: RAII-based exclusive file locking (flock / LockFileEx).
-   - SpaceManager: Bitmap-based block allocation.
-
-4. **Level 3: Cryptography (scb-vka-crypto)**
-   - CryptoEngine trait: The 512-bit pipeline engine.
-   - Type-safe keys: `Key<Role, N>` with role separation (KEK, MK, CK).
-   - ConsumedNonce: Linear type enforcing single-use nonce semantics.
-   - AAD Context Binding: Strict AadBuilder with ObjectId, Version, Epoch, Purpose.
-   - Streaming: encrypt_stream / decrypt_stream with per-chunk AEAD and global MAC.
-
-5. **Level 4: Orchestration (scb-vka-orchestrator)**
-   - VaultManager: Coordinates Keys + IO + Crypto.
-   - Enforces Epoch progression and Context Binding.
-   - Integer overflow protection on all size calculations.
-   - Rollback safety with logged deallocation failures.
-
-6. **Level 5: Interface (scb-vka-cli / scb-vka-shell)**
-   - CLI: Scriptable vault operations (create, add, read, list, delete).
-   - Shell: Interactive REPL exploration (ls, cat, rm, help, exit).
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         CRATE DEPENDENCY GRAPH                          │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   Level 5: Interface                                                    │
+│   ┌───────────────────────────────────────────────────────────────┐    │
+│   │  scb-vka-cli          scb-vka-shell                           │    │
+│   │  (CLI commands)       (Interactive REPL)                      │    │
+│   └─────────────────────────────┬─────────────────────────────────┘    │
+│                                 │                                       │
+│   Level 4: Orchestration        ▼                                       │
+│   ┌───────────────────────────────────────────────────────────────┐    │
+│   │  scb-vka-orchestrator                                         │    │
+│   │  (VaultManager: coordinates Keys + IO + Crypto)               │    │
+│   └───────────┬─────────────────┬─────────────────┬───────────────┘    │
+│               │                 │                 │                     │
+│   Level 3:    ▼       Level 2:  ▼       Level 2:  ▼                     │
+│   ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐          │
+│   │ scb-vka-crypto  │ │  scb-vka-io     │ │  scb-vka-hsp    │          │
+│   │ (CryptoEngine)  │ │  (Layout/Lock)  │ │  (TPM/Enclave)  │          │
+│   └────────┬────────┘ └────────┬────────┘ └────────┬────────┘          │
+│            │                   │                   │                    │
+│            └───────────────────┴───────────────────┘                    │
+│                                │                                        │
+│   Level 1: Core Logic          ▼                                        │
+│   ┌───────────────────────────────────────────────────────────────┐    │
+│   │  scb-vka-common                                               │    │
+│   │  (Constants, Error types, Logging)                            │    │
+│   └─────────────────────────────┬─────────────────────────────────┘    │
+│                                 │                                       │
+│   Level 0: Kernel & Memory      ▼                                       │
+│   ┌───────────────────────────────────────────────────────────────┐    │
+│   │  scb-vka-memory                                               │    │
+│   │  (SecureBox, mlock, zeroize-on-drop)                          │    │
+│   └───────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## Security Model
 
-### The 512-bit Pipeline
+### The 512-bit Key Derivation Pipeline
 
-Keys are derived in a strict one-way chain:
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                     KEY DERIVATION PIPELINE                             │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌──────────────┐    ┌──────────────┐                                 │
+│   │   Password   │    │     Salt     │                                 │
+│   │  (user input)│    │  (32 bytes)  │                                 │
+│   └──────┬───────┘    └──────┬───────┘                                 │
+│          │                   │                                          │
+│          └─────────┬─────────┘                                          │
+│                    ▼                                                    │
+│          ┌─────────────────────┐                                       │
+│          │      Argon2id       │                                       │
+│          │  ┌───────────────┐  │                                       │
+│          │  │ Memory: 64 MiB│  │                                       │
+│          │  │ Iterations: 3 │  │                                       │
+│          │  │ Parallelism: 4│  │                                       │
+│          │  └───────────────┘  │                                       │
+│          └──────────┬──────────┘                                       │
+│                     │                                                   │
+│                     ▼                                                   │
+│          ┌─────────────────────┐                                       │
+│          │  User Root (UR)     │◄─────── 64 bytes                      │
+│          └──────────┬──────────┘                                       │
+│                     │                                                   │
+│                     │  ┌─────────────────────────────────────────┐     │
+│                     │  │         HARDWARE ENCLAVE                │     │
+│                     │  │  ┌─────────────────────────────────┐    │     │
+│                     └──┼─▶│  TPM 2.0: HMAC(HW_KEY, UR)      │    │     │
+│                        │  │  Enclave: Bind(PK, UR)          │    │     │
+│                        │  │  ─────────────────────────────  │    │     │
+│                        │  │  Key NEVER leaves the chip!     │    │     │
+│                        │  └───────────────┬─────────────────┘    │     │
+│                        └──────────────────┼──────────────────────┘     │
+│                                           │                             │
+│                                           ▼                             │
+│          ┌─────────────────────┐                                       │
+│          │  Master Root (MR)   │◄─────── 64 bytes                      │
+│          └──────────┬──────────┘                                       │
+│                     │                                                   │
+│      VID ──────────▶│                                                   │
+│      Timestamp ────▶│                                                   │
+│      Version ──────▶│                                                   │
+│                     ▼                                                   │
+│          ┌─────────────────────┐                                       │
+│          │   HMAC-SHA3-512     │                                       │
+│          └──────────┬──────────┘                                       │
+│                     │                                                   │
+│                     ▼                                                   │
+│          ┌─────────────────────┐                                       │
+│          │  Context Root (CR)  │◄─────── 64 bytes                      │
+│          └──────────┬──────────┘                                       │
+│                     │                                                   │
+│                     ▼                                                   │
+│          ┌─────────────────────┐                                       │
+│          │   HKDF-SHA3-512     │                                       │
+│          │   (Expand Phase)    │                                       │
+│          └──────────┬──────────┘                                       │
+│                     │                                                   │
+│     ┌───────────────┼───────────────┐                                  │
+│     │               │               │                                   │
+│     ▼               ▼               ▼                                   │
+│ ┌────────┐     ┌────────┐     ┌────────┐                               │
+│ │  KEK   │     │   MK   │     │   CK   │                               │
+│ │ 32 B   │     │  32 B  │     │  32 B  │                               │
+│ └────────┘     └────────┘     └────────┘                               │
+│     │               │               │                                   │
+│     │               │               └──▶ (Reserved for future use)     │
+│     │               │                                                   │
+│     │               └───────────────────▶ Header MAC computation       │
+│     │                                                                   │
+│     └───────────────────────────────────▶ Wrap per-object DEKs         │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
-1. **User Root (UR)**: Derived from Password + Salt via Argon2id (64-byte output, min 64 MiB memory).
-2. **Recovery Root (RR)**: Derived from HSP Machine Secret via HKDF-SHA3-512.
-3. **Master Root (MR)**: Fusion of UR + RR via HMAC-SHA3-512 with version binding.
-4. **Context Root (CR)**: MR + VaultID + Timestamp via HMAC-SHA3-512 with version binding.
-5. **Leaf Keys**: KEK (32B), MK (32B), CK (32B) derived from CR via HKDF-SHA3-512.
+### Hardware Security Binding
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    PLATFORM-SPECIFIC HARDWARE SECURITY                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                         macOS                                    │   │
+│  │  ┌───────────────────────────────────────────────────────────┐  │   │
+│  │  │                    SECURE ENCLAVE                          │  │   │
+│  │  │  ┌─────────────────┐    ┌──────────────────────────────┐  │  │   │
+│  │  │  │  P-256 Private  │    │  SecKeyCopyPublicKey()       │  │  │   │
+│  │  │  │     Key         │───▶│  Export public key (65 B)    │  │  │   │
+│  │  │  │  (non-export)   │    └──────────────┬───────────────┘  │  │   │
+│  │  │  └─────────────────┘                   │                   │  │   │
+│  │  └────────────────────────────────────────┼───────────────────┘  │   │
+│  │                                           │                       │   │
+│  │       MR = SHA3-512(PK || SHA256(UR))◄────┘                      │   │
+│  │                                                                   │   │
+│  │  ✓ Different Mac = Different PK = Different MR                  │   │
+│  │  ✓ Vault is machine-bound                                        │   │
+│  └───────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌─────────────────────────────────────────────────────────────────┐   │
+│  │                    Linux / Windows                               │   │
+│  │  ┌───────────────────────────────────────────────────────────┐  │   │
+│  │  │                      TPM 2.0                               │  │   │
+│  │  │  ┌─────────────────┐    ┌──────────────────────────────┐  │  │   │
+│  │  │  │  HMAC Primary   │    │  context.hmac(HW_KEY, UR)    │  │  │   │
+│  │  │  │     Key         │───▶│  Execute HMAC inside TPM     │  │  │   │
+│  │  │  │  (non-export)   │    └──────────────┬───────────────┘  │  │   │
+│  │  │  └─────────────────┘                   │                   │  │   │
+│  │  └────────────────────────────────────────┼───────────────────┘  │   │
+│  │                                           │                       │   │
+│  │       MR = SHA3-512(HMAC_result)◄─────────┘                      │   │
+│  │                                                                   │   │
+│  │  ✓ HMAC computed INSIDE TPM chip                                 │   │
+│  │  ✓ Attacker cannot compute MR without TPM access                 │   │
+│  └───────────────────────────────────────────────────────────────────┘   │
+│                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────┐ │
+│  │  Unsupported Platform → COMPILE ERROR (no mock/fallback)          │ │
+│  └───────────────────────────────────────────────────────────────────┘ │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ### Zero-Trust Storage Layout
 
-- **Superblock (8 KiB)**: Magic bytes, Salt, VID, Timestamp, Header location, Header MAC.
-- **Auth Header**: Encrypted Metadata (VaultHeader + Bitmap + FileTable) with Encrypt-then-MAC.
-- **Data Region (1 MiB offset)**: Per-object Wrapped DEK + Nonce + Encrypted Chunks + Global MAC.
-- **Space Management**: Bitmap-based block allocation (4 KiB blocks).
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         VAULT FILE STRUCTURE                            │
+│                            (.bbx format)                                │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Offset 0                                                               │
+│  ┌───────────────────────────────────────────────────────┐             │
+│  │                    SUPERBLOCK (8 KiB)                  │             │
+│  │  ┌─────────────────────────────────────────────────┐  │             │
+│  │  │  Magic: "BLACKBOX"  │  Version: u32             │  │             │
+│  │  ├─────────────────────┼───────────────────────────┤  │             │
+│  │  │  Salt (32 bytes)    │  VID (16 bytes)           │  │             │
+│  │  ├─────────────────────┼───────────────────────────┤  │             │
+│  │  │  Created Timestamp  │  Total Blocks             │  │             │
+│  │  └─────────────────────┴───────────────────────────┘  │             │
+│  └───────────────────────────────────────────────────────┘             │
+│                                                                         │
+│  Offset 8 KiB                                                           │
+│  ┌───────────────────────────────────────────────────────┐             │
+│  │               HEADER SLOT A (256 KiB)                  │             │
+│  │  ┌─────────────────────────────────────────────────┐  │             │
+│  │  │  Blob Size (8 B) │ MAC (32 B) │ Encrypted Blob  │  │             │
+│  │  │  ┌─────────────────────────────────────────┐    │  │             │
+│  │  │  │  Wrapped DEK │ Nonce │ Ciphertext │ Tag │    │  │             │
+│  │  │  │  ┌─────────────────────────────────┐    │    │  │   A/B      │
+│  │  │  │  │  VaultHeader (epoch, count)     │    │    │  │ Ping-Pong  │
+│  │  │  │  │  Bitmap (space allocation)      │    │    │  │  Design    │
+│  │  │  │  │  FileTable (object metadata)    │    │    │  │             │
+│  │  │  │  └─────────────────────────────────┘    │    │  │             │
+│  │  │  └─────────────────────────────────────────┘    │  │             │
+│  │  └─────────────────────────────────────────────────┘  │             │
+│  └───────────────────────────────────────────────────────┘             │
+│                                                                         │
+│  Offset 264 KiB                                                         │
+│  ┌───────────────────────────────────────────────────────┐             │
+│  │               HEADER SLOT B (256 KiB)                  │             │
+│  │  (Same structure as Slot A - alternating writes)       │             │
+│  └───────────────────────────────────────────────────────┘             │
+│                                                                         │
+│  Offset 1 MiB (DATA_REGION_START)                                       │
+│  ┌───────────────────────────────────────────────────────┐             │
+│  │                    DATA REGION                         │             │
+│  │  ┌─────────────────────────────────────────────────┐  │             │
+│  │  │  OBJECT 1                                       │  │             │
+│  │  │  ┌───────────┬───────────┬─────────────────┐   │  │             │
+│  │  │  │WrappedDEK │  Nonce    │ Encrypted Data  │   │  │             │
+│  │  │  │ (72 bytes)│ (24 bytes)│ (chunks + tags) │   │  │             │
+│  │  │  └───────────┴───────────┴─────────────────┘   │  │             │
+│  │  │  Stream: [Chunk1|Tag1][Chunk2|Tag2]...[MAC]    │  │             │
+│  │  └─────────────────────────────────────────────────┘  │             │
+│  │                                                        │             │
+│  │  ┌─────────────────────────────────────────────────┐  │             │
+│  │  │  OBJECT 2                                       │  │             │
+│  │  │  (Same structure)                               │  │             │
+│  │  └─────────────────────────────────────────────────┘  │             │
+│  │                          ...                           │             │
+│  └───────────────────────────────────────────────────────┘             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
-### Consumable Nonces
+### Streaming Encryption
 
-Nonces are never reused. The ConsumedNonce type enforces consumption semantics at the type system level, requiring a fresh random nonce for every operation. Streaming operations use a deterministic counter scheme: `[128-bit random | 64-bit LE counter]`.
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    STREAMING ENCRYPTION PIPELINE                        │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   Plaintext Stream                                                      │
+│   ─────────────────────────────────────────────────────────────────▶   │
+│   │ Chunk 0 │ Chunk 1 │ Chunk 2 │ Chunk 3 │ ... │ Chunk N │            │
+│   │  1 MiB  │  1 MiB  │  1 MiB  │  1 MiB  │     │ ≤1 MiB  │            │
+│   └────┬────┴────┬────┴────┬────┴────┬────┴─────┴────┬────┘            │
+│        │         │         │         │               │                  │
+│        ▼         ▼         ▼         ▼               ▼                  │
+│   ┌─────────┬─────────┬─────────┬─────────┬─────┬─────────┐            │
+│   │ Nonce+0 │ Nonce+1 │ Nonce+2 │ Nonce+3 │ ... │ Nonce+N │            │
+│   └────┬────┴────┬────┴────┬────┴────┬────┴─────┴────┬────┘            │
+│        │         │         │         │               │                  │
+│        ▼         ▼         ▼         ▼               ▼                  │
+│   ╔═════════╗ ╔═════════╗ ╔═════════╗ ╔═════════╗   ╔═════════╗        │
+│   ║XChaCha20║ ║XChaCha20║ ║XChaCha20║ ║XChaCha20║   ║XChaCha20║        │
+│   ║Poly1305 ║ ║Poly1305 ║ ║Poly1305 ║ ║Poly1305 ║   ║Poly1305 ║        │
+│   ║  (DEK)  ║ ║  (DEK)  ║ ║  (DEK)  ║ ║  (DEK)  ║   ║  (DEK)  ║        │
+│   ╚════╤════╝ ╚════╤════╝ ╚════╤════╝ ╚════╤════╝   ╚════╤════╝        │
+│        │           │           │           │             │              │
+│        ▼           ▼           ▼           ▼             ▼              │
+│   ┌─────────┐ ┌─────────┐ ┌─────────┐ ┌─────────┐   ┌─────────┐        │
+│   │Cipher+  │ │Cipher+  │ │Cipher+  │ │Cipher+  │   │Cipher+  │        │
+│   │Tag (16B)│ │Tag (16B)│ │Tag (16B)│ │Tag (16B)│   │Tag (16B)│        │
+│   └────┬────┘ └────┬────┘ └────┬────┘ └────┬────┘   └────┬────┘        │
+│        │           │           │           │             │              │
+│        └───────────┴───────────┴───────────┴─────────────┘              │
+│                                    │                                    │
+│                                    ▼                                    │
+│                           ┌───────────────┐                            │
+│                           │ HMAC-SHA3-256 │                            │
+│                           │   (DEK key)   │                            │
+│                           └───────┬───────┘                            │
+│                                   │                                     │
+│                                   ▼                                     │
+│                           ┌───────────────┐                            │
+│                           │   Global MAC  │                            │
+│                           │   (32 bytes)  │                            │
+│                           └───────────────┘                            │
+│                                                                         │
+│   Output: [CT0|Tag0][CT1|Tag1]...[CTn|Tagn][GlobalMAC]                 │
+│                                                                         │
+│   ✓ Per-chunk authentication (Poly1305)                                │
+│   ✓ Full-stream integrity (HMAC-SHA3-256)                              │
+│   ✓ No truncation/splicing attacks                                     │
+│   ✓ Constant memory usage (1 chunk at a time)                          │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
-### Full-File Integrity
+### Nonce Management
 
-Every encrypted stream is authenticated with a global HMAC-SHA3-256 computed over all ciphertext chunks and their per-chunk Poly1305 tags. This MAC is appended after the final chunk and verified before any plaintext is considered valid, preventing truncation and splicing attacks.
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      NONCE STRUCTURE (24 bytes)                         │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│   ┌────────────────────────────────┬─────────────────────────────┐     │
+│   │     Random Portion             │     Counter Portion         │     │
+│   │        (16 bytes)              │        (8 bytes)            │     │
+│   └────────────────────────────────┴─────────────────────────────┘     │
+│                                                                         │
+│   Single-shot operations:                                               │
+│   ┌───────────────────────────────────────────────────────────────┐    │
+│   │  CSPRNG(24 bytes) - fully random nonce                        │    │
+│   └───────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+│   Streaming operations:                                                 │
+│   ┌───────────────────────────────────────────────────────────────┐    │
+│   │  Base: [CSPRNG(16 bytes)][0x0000000000000000]                 │    │
+│   │                                                                │    │
+│   │  Chunk 0: [random_16][counter = 0]                            │    │
+│   │  Chunk 1: [random_16][counter = 1]                            │    │
+│   │  Chunk 2: [random_16][counter = 2]                            │    │
+│   │  ...                                                           │    │
+│   │  Chunk N: [random_16][counter = N]                            │    │
+│   └───────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+│   ConsumedNonce Type:                                                   │
+│   ┌───────────────────────────────────────────────────────────────┐    │
+│   │  #[must_use]                                                   │    │
+│   │  pub struct ConsumedNonce(Nonce);                             │    │
+│   │                                                                │    │
+│   │  // Nonce is MOVED (consumed) - cannot be reused              │    │
+│   │  fn encrypt(nonce: ConsumedNonce, ...) { ... }                │    │
+│   └───────────────────────────────────────────────────────────────┘    │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -150,6 +488,13 @@ All commands prompt for password interactively. Password is never passed via com
 ./blackbox delete --vault my.bbx --id <OBJECT_ID>
 ```
 
+### Compact Vault (Vacuum)
+
+```bash
+./blackbox vacuum --vault my.bbx
+# Reclaims space from deleted objects
+```
+
 ### Interactive Shell
 
 ```bash
@@ -176,12 +521,22 @@ cargo build --features test-kdf
 
 ## Platform Support
 
-| Platform | Memory Locking | File Locking | Core Dump Prevention | HSP |
-|----------|---------------|-------------|---------------------|-----|
-| Linux    | mlock/munlock | POSIX flock | setrlimit + PR_SET_DUMPABLE | TPM 2.0 / Machine-ID |
-| macOS    | mlock/munlock | POSIX flock | setrlimit | IOKit / Keychain |
-| Windows  | VirtualLock/VirtualUnlock | LockFileEx/UnlockFileEx | SetErrorMode | TPM 2.0 / MachineGUID |
-| Other    | No-op (graceful fallback) | No-op | No-op | Compile error (requires implementation) |
+```
+┌────────────┬─────────────────┬─────────────────┬───────────────────┬─────────────────┐
+│  Platform  │  Memory Locking │  File Locking   │  Core Dump Prev.  │  Hardware Sec.  │
+├────────────┼─────────────────┼─────────────────┼───────────────────┼─────────────────┤
+│  Linux     │  mlock/munlock  │  POSIX flock    │  setrlimit +      │  TPM 2.0        │
+│            │                 │                 │  PR_SET_DUMPABLE  │  (/dev/tpmrm0)  │
+├────────────┼─────────────────┼─────────────────┼───────────────────┼─────────────────┤
+│  macOS     │  mlock/munlock  │  POSIX flock    │  setrlimit        │  Secure Enclave │
+│            │                 │                 │                   │  (T2/M1/M2/M3)  │
+├────────────┼─────────────────┼─────────────────┼───────────────────┼─────────────────┤
+│  Windows   │  VirtualLock    │  LockFileEx     │  SetErrorMode     │  TPM 2.0 (TBS)  │
+├────────────┼─────────────────┼─────────────────┼───────────────────┼─────────────────┤
+│  Other     │  COMPILE ERROR  │  COMPILE ERROR  │  COMPILE ERROR    │  COMPILE ERROR  │
+│            │  (not supported)│  (not supported)│  (not supported)  │  (not supported)│
+└────────────┴─────────────────┴─────────────────┴───────────────────┴─────────────────┘
+```
 
 ---
 
@@ -236,3 +591,5 @@ See LICENSE file.
 | zeroize | 1.8 | Secure memory zeroing |
 | aead | 0.5 | AEAD trait abstraction |
 | getrandom | 0.2 | OS-level CSPRNG |
+| tss-esapi | 7.5 | TPM 2.0 integration (Linux/Windows) |
+| security-framework | 2.11 | macOS Security.framework bindings |
