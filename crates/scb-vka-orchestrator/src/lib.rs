@@ -22,7 +22,6 @@ use scb_vka_common::config::{
     SUPERBLOCK_SIZE, TAG_LEN, VID_LEN, WRAPPED_DEK_SIZE,
 };
 pub use scb_vka_common::error::{VaultError, VaultErrorKind};
-pub use scb_vka_common::log::{LogLevel, NullLogger, VaultEvent, VaultLogger};
 use scb_vka_crypto::engine::{
     AadBuilder, AadPurpose, ConsumedNonce, DefaultCryptoEngine, KdfParams, NonceFactory,
 };
@@ -104,23 +103,27 @@ pub trait VaultManager {
 // IMPLEMENTATION
 // =============================================================================
 
-pub struct DefaultVaultManager<L> {
+use tracing::{error, info, instrument};
+
+pub struct DefaultVaultManager {
     enclave: Box<dyn scb_vka_hsp::HardwareEnclave>,
-    logger: L,
     crypto: DefaultCryptoEngine,
 }
 
-impl<L> DefaultVaultManager<L>
-where
-    L: VaultLogger,
-{
-    pub fn new(logger: L) -> Self {
+impl Default for DefaultVaultManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DefaultVaultManager {
+    #[must_use]
+    pub fn new() -> Self {
         // Enforce Process Hardening
         let _ = scb_vka_memory::disable_core_dumps();
 
         Self {
             enclave: scb_vka_hsp::create_platform_enclave(),
-            logger,
             crypto: DefaultCryptoEngine,
         }
     }
@@ -162,9 +165,7 @@ where
             return Err(VaultError::new(VaultErrorKind::IntegrityError));
         }
 
-        self.logger.log(&VaultEvent::VaultUnlocked {
-            vid: *superblock.vid(),
-        });
+        info!(vid = %hex::encode(&superblock.vid()[..8]), "Vault successfully unlocked");
 
         Ok(VaultSession {
             vid: *superblock.vid(),
@@ -179,10 +180,8 @@ where
     }
 }
 
-impl<L> VaultManager for DefaultVaultManager<L>
-where
-    L: VaultLogger,
-{
+impl VaultManager for DefaultVaultManager {
+    #[instrument(skip(self, password))]
     fn create_vault(&self, path: &Path, password: &[u8]) -> Result<VaultInfo, VaultError> {
         let salt_vec = self.crypto.csprng(SALT_LEN)?;
         let mut salt = [0u8; SALT_LEN];
@@ -251,32 +250,29 @@ where
         mk.zeroize();
         ck.zeroize();
 
-        self.logger.log(&VaultEvent::VaultCreated { vid });
+        info!(vid = %hex::encode(&vid[..8]), path = %path.display(), "Vault successfully created");
         Ok(VaultInfo {
             path: path.to_path_buf(),
             vid,
         })
     }
 
+    #[instrument(skip(self, password))]
     fn unlock_vault(&self, path: &Path, password: &[u8]) -> Result<VaultSession, VaultError> {
         let result = self.unlock_vault_inner(path, password);
         if let Err(e) = &result {
             // Log security-relevant failures
             match e.kind {
                 VaultErrorKind::AuthenticationFailed | VaultErrorKind::IntegrityError => {
-                    self.logger.log(&VaultEvent::Error {
-                        message: format!(
-                            "Unlock failed: Authentication or Integrity error ({:?})",
-                            e.kind
-                        ),
-                    });
+                    error!(error = ?e.kind, "Vault unlock failed: Authentication or Integrity compromised");
                 }
-                _ => {} // Ignore I/O errors to avoid log spam, or log as debug?
+                _ => {} // Ignore I/O errors to avoid log spam
             }
         }
         result
     }
 
+    #[instrument(skip(self, session))]
     fn lock_vault(&self, mut session: VaultSession) -> Result<(), VaultError> {
         let vid = session.vid;
         for entry in &mut session.file_table {
@@ -284,10 +280,11 @@ where
         }
         session.file_table.clear();
         session.header.zeroize();
-        self.logger.log(&VaultEvent::VaultLocked { vid });
+        info!(vid = %hex::encode(&vid[..8]), "Vault strictly locked. Key material zeroized.");
         Ok(())
     }
 
+    #[instrument(skip(self, session, reader))]
     fn add_object(
         &self,
         session: &mut VaultSession,
@@ -438,9 +435,7 @@ where
                 .deallocate(start_block, num_blocks)
                 .is_err()
             {
-                self.logger.log(&VaultEvent::Error {
-                    message: "Space leak during rollback: failed to deallocate blocks".to_string(),
-                });
+                error!("Space leak during rollback: failed to deallocate blocks");
             }
             return Err(VaultError::new(VaultErrorKind::IoError));
         }
@@ -498,13 +493,11 @@ where
         )?;
         session.active_slot_offset = target_slot;
 
-        self.logger.log(&VaultEvent::ObjectAdded {
-            vid: session.vid,
-            object_id: oid_bytes,
-        });
+        info!(vid = %hex::encode(&session.vid[..8]), object_id = %hex::encode(oid_bytes), "Object encrypted and added");
         Ok(oid_bytes)
     }
 
+    #[instrument(skip(self, session, writer))]
     fn read_object(
         &self,
         session: &mut VaultSession,
@@ -602,13 +595,11 @@ where
             return Err(VaultError::new(VaultErrorKind::IntegrityError));
         }
 
-        self.logger.log(&VaultEvent::ObjectRead {
-            vid: session.vid,
-            object_id: *object_id,
-        });
+        info!(vid = %hex::encode(&session.vid[..8]), object_id = %hex::encode(object_id), bytes = bytes_written, "Object decrypted and read");
         Ok(bytes_written)
     }
 
+    #[instrument(skip(self, session))]
     fn delete_object(
         &self,
         session: &mut VaultSession,
@@ -659,13 +650,11 @@ where
             target_slot,
         )?;
         session.active_slot_offset = target_slot;
-        self.logger.log(&VaultEvent::ObjectDeleted {
-            vid: session.vid,
-            object_id: *object_id,
-        });
+        info!(vid = %hex::encode(&session.vid[..8]), object_id = %hex::encode(object_id), "Object cryptographically deleted");
         Ok(())
     }
 
+    #[instrument(skip(self, session))]
     fn list_objects(&self, session: &VaultSession) -> Result<Vec<ObjectMeta>, VaultError> {
         let mut list = Vec::new();
         for entry in &session.file_table {
@@ -690,6 +679,7 @@ where
         Ok(list)
     }
 
+    #[instrument(skip(self, session))]
     fn vacuum_vault(&self, mut session: VaultSession, path: &Path) -> Result<(), VaultError> {
         // Prepare temporary file
         let mut temp_path_str = path.to_string_lossy().to_string();

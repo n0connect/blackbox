@@ -11,7 +11,10 @@ use crate::config;
 const DISPLAY_MSG: &str = config::ERROR_DISPLAY_MSG;
 
 /// Opaque vault error.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Implements `Display` to show a generic message to prevent data leakage.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{DISPLAY_MSG}")]
 pub struct VaultError {
     /// Internal error kind (not exposed to users via Display).
     pub kind: VaultErrorKind,
@@ -65,14 +68,6 @@ impl From<VaultErrorKind> for VaultError {
         Self::new(kind)
     }
 }
-
-impl std::fmt::Display for VaultError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{DISPLAY_MSG}")
-    }
-}
-
-impl std::error::Error for VaultError {}
 
 /// Bounds check utility.
 ///

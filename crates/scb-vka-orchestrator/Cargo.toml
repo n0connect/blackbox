@@ -20,6 +20,8 @@ scb-vka-crypto = { path = "../scb-vka-crypto" }
 scb-vka-memory = { path = "../scb-vka-memory" }
 scb-vka-hsp = { path = "../scb-vka-hsp" }
 zerocopy = "0.7"
+tracing = "0.1.44"
+hex = "0.4.3"
 
 [dev-dependencies]
 tempfile = "3.25.0"

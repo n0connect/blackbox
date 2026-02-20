@@ -23,6 +23,8 @@ use scb_vka_common::error::{VaultError, VaultErrorKind};
 use crate::{CryptoVersion, Epoch, KeyCK, KeyCR, KeyKEK, KeyMK, KeyMR, KeyUR, Nonce, ObjectId};
 use scb_vka_memory::SecureBuffer;
 
+use zeroize::{Zeroize, Zeroizing};
+
 // Aliases for internal use
 type HmacSha3_256 = hmac::Hmac<Sha3_256>;
 type HmacSha3_512 = hmac::Hmac<Sha3_512>;
@@ -285,7 +287,7 @@ pub trait CryptoEngine {
         ciphertext: &[u8],
         tag: &[u8; TAG_LEN],
         aad: &AadContext,
-    ) -> Result<Vec<u8>, VaultError>;
+    ) -> Result<Zeroizing<Vec<u8>>, VaultError>;
 
     /// Wrap DEK
     ///
@@ -410,14 +412,16 @@ impl CryptoEngine for DefaultCryptoEngine {
             .hash_password_into(password, salt, &mut ur_bytes)
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
         let ur = KeyUR::new(ur_bytes);
+        ur_bytes.zeroize();
 
         // 2. MR (Hardware Enclave Signing)
         // Send the fully hashed User Root (UR) into the physical chip.
         // The chip uses its Non-Exportable key to sign the UR, turning it into the Master Root (MR).
-        let mr_bytes = enclave.sign_with_hardware_key(ur.as_bytes())?;
+        let mut mr_bytes = enclave.sign_with_hardware_key(ur.as_bytes())?;
         drop(ur); // EAGER ZEROIZE: UR's job is done. ZeroizeOnDrop wipes 64 bytes immediately.
 
         let mr = KeyMR::new(mr_bytes);
+        mr_bytes.zeroize();
 
         // 3. CR
         let mut context_mac = <HmacSha3_512 as Mac>::new_from_slice(mr.as_bytes())
@@ -429,8 +433,9 @@ impl CryptoEngine for DefaultCryptoEngine {
         context_mac.update(&timestamp.to_le_bytes()); // Keep LE for timestamp logic
         context_mac.update(LABEL_CR);
         context_mac.update(&CRYPTO_VERSION.to_be_bytes());
-        let cr_bytes: [u8; 64] = context_mac.finalize().into_bytes().into();
+        let mut cr_bytes: [u8; 64] = context_mac.finalize().into_bytes().into();
         let cr = KeyCR::new(cr_bytes);
+        cr_bytes.zeroize();
 
         // 4. Leaf Keys
         let hkdf_leaf = Hkdf::<Sha3_512>::new(None, cr.as_bytes());
@@ -460,6 +465,7 @@ impl CryptoEngine for DefaultCryptoEngine {
                 .try_into()
                 .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?,
         );
+        okm.zeroize();
 
         Ok((kek, mk, ck))
     }
@@ -500,7 +506,7 @@ impl CryptoEngine for DefaultCryptoEngine {
         ciphertext: &[u8],
         tag: &[u8; TAG_LEN],
         aad: &AadContext,
-    ) -> Result<Vec<u8>, VaultError> {
+    ) -> Result<Zeroizing<Vec<u8>>, VaultError> {
         let cipher = XChaCha20Poly1305::new_from_slice(dek.as_bytes())
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
 
@@ -513,9 +519,11 @@ impl CryptoEngine for DefaultCryptoEngine {
             aad: &aad.data,
         };
 
-        cipher
+        let plaintext = cipher
             .decrypt(nonce_ga, payload)
-            .map_err(|_| VaultError::new(VaultErrorKind::AuthenticationFailed))
+            .map_err(|_| VaultError::new(VaultErrorKind::AuthenticationFailed))?;
+
+        Ok(Zeroizing::new(plaintext))
     }
 
     fn wrap_dek(
@@ -564,7 +572,7 @@ impl CryptoEngine for DefaultCryptoEngine {
             return Err(VaultError::new(VaultErrorKind::IntegrityError));
         }
 
-        Ok(KeyKEK::new(pt.try_into().map_err(|_| {
+        Ok(KeyKEK::new(pt.as_slice().try_into().map_err(|_| {
             VaultError::new(VaultErrorKind::IntegrityError)
         })?))
     }
