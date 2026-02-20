@@ -7,6 +7,8 @@
 
 BlackBox is a Zero-Trust, Layered Security vault system designed for extreme data protection. It employs a 512-bit Cryptographic Pipeline, Hardware Security Binding, Memory Hardening, and Streaming I/O to ensure data confidentiality and integrity.
 
+> **⚠️ Disclaimer:** This is an experimental security research project. It intentionally offers no password recovery, no backup mechanism, and no multi-device support. Not intended for production use.
+
 ---
 
 > **⚠️ CRITICAL WARNINGS**
