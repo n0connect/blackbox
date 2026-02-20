@@ -597,11 +597,7 @@ Shell commands: `ls`, `cat <id>`, `rm <id>`, `help`, `exit`
 cargo build --release
 ```
 
-For development builds with reduced KDF memory (256 MiB instead of 1 GiB):
-
-```bash
-cargo build --features test-kdf
-```
+> **Note:** KDF always uses minimum 1 GiB memory for brute-force resistance. No bypass feature available.
 
 ---
 

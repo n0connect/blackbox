@@ -33,17 +33,10 @@
 //! [wrapped_dek: 72 bytes][nonce: 24][ciphertext: N][tag: 16]
 //! ```
 
-#[cfg(feature = "mock-hsp")]
-pub mod hsp;
-#[cfg(not(feature = "mock-hsp"))]
-/// HSP module — provide a real `HardwareSecurityProvider` implementation here.
-pub mod hsp {}
-
 pub mod layout;
 pub mod manager;
 pub mod lock;
 
-pub use hsp::*;
 pub use layout::*;
 pub use manager::*;
 pub use lock::*;

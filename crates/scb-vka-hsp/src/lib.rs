@@ -6,7 +6,7 @@
 //!
 //! | Platform | Hardware | Implementation |
 //! |----------|----------|----------------|
-//! | macOS    | Secure Enclave (T2/M1/M2/M3) | P-256 ECDSA signing |
+//! | macOS    | Secure Enclave (T2/M1/M2/M3) | P-256 ECDH key agreement |
 //! | Linux    | TPM 2.0 | HMAC-SHA256 |
 //! | Windows  | TPM 2.0 (TBS) | HMAC-SHA256 |
 //!

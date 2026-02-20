@@ -26,6 +26,7 @@ use crate::HardwareEnclave;
 use scb_vka_common::error::{VaultError, VaultErrorKind};
 use sha3::{Digest, Sha3_512};
 use std::ptr;
+use zeroize::Zeroize;
 
 use core_foundation::base::{CFType, TCFType};
 use core_foundation::boolean::CFBoolean;
@@ -257,24 +258,27 @@ impl HardwareEnclave for MacOSEnclave {
     fn sign_with_hardware_key(&self, ur: &[u8; 64]) -> Result<[u8; 64], VaultError> {
         // Step 1: Convert UR to P-256 point via hash-to-curve
         // This is deterministic: same UR = same point
-        let peer_public_bytes = self.ur_to_p256_point(ur)?;
+        let mut peer_public_bytes = self.ur_to_p256_point(ur)?;
 
         // Step 2: Create SecKey from the P-256 point
         let peer_public_key = self.create_peer_public_key(&peer_public_bytes)?;
+        peer_public_bytes.zeroize();
 
         // Step 3: Perform ECDH inside Secure Enclave
         // Private key NEVER leaves the chip!
         // Shared secret is computed INSIDE the Secure Enclave
-        let shared_secret = self.perform_ecdh(&peer_public_key)?;
+        let mut shared_secret = self.perform_ecdh(&peer_public_key)?;
 
         // Step 4: Expand shared secret to 64-byte MR
         let mut expander = Sha3_512::new();
         expander.update(b"BLACKBOX_MR_EXPANDER");
         expander.update(&shared_secret);
-        let expansion = expander.finalize();
+        let mut expansion = expander.finalize();
+        shared_secret.zeroize();
 
         let mut mr = [0u8; 64];
         mr.copy_from_slice(&expansion);
+        expansion.zeroize();
 
         Ok(mr)
     }

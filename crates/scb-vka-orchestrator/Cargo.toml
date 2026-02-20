@@ -6,11 +6,7 @@ description = "SCB-VKA vault lifecycle (VaultManager)"
 license = "MIT OR Apache-2.0"
 
 [features]
-default = ["mock-hsp"]
-# mock-hsp: Enable mock hardware security provider for development.
-mock-hsp = ["scb-vka-io/mock-hsp"]
-# test-kdf: KDF bellek 256 MiB (test/CI). Açıkken create/unlock hızlanır. Crypto'ya iletir.
-test-kdf = ["scb-vka-crypto/test-kdf"]
+default = []
 
 [dependencies]
 zeroize = "1.8"

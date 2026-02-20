@@ -36,6 +36,9 @@ pub const TAG_LEN: usize = 16;
 /// Salt length for Argon2
 pub const SALT_LEN: usize = 32;
 
+/// Minimum password length (8 characters for basic security)
+pub const MIN_PASSWORD_LEN: usize = 8;
+
 /// Argon2 output length (512-bit for UR)
 pub const ARGON2_OUTPUT_LEN: usize = 64;
 
@@ -92,12 +95,7 @@ pub const ARGON2_MIN_PARALLELISM: u32 = 1;
 /// Argon2 maximum parallelism
 pub const ARGON2_MAX_PARALLELISM: u32 = 16;
 
-/// KDF Memory minimum (feature-gated)
-#[cfg(feature = "test-kdf")]
-pub const KDF_MEMORY_KIB_MIN: u32 = 262_144; // 256 MiB for tests
-
-/// KDF Memory minimum (1 GiB for production)
-#[cfg(not(feature = "test-kdf"))]
+/// KDF Memory minimum (1 GiB - NO COMPROMISE for brute-force resistance)
 pub const KDF_MEMORY_KIB_MIN: u32 = 1_048_576;
 
 /// KDF iterations minimum
@@ -128,6 +126,9 @@ pub const BLOCK_SIZE: u32 = 4096;
 
 /// Maximum vault size (12 GB)
 pub const MAX_VAULT_SIZE: u64 = 12 * 1024 * 1024 * 1024;
+
+/// Maximum total blocks (derived from `MAX_VAULT_SIZE` / `BLOCK_SIZE`)
+pub const MAX_TOTAL_BLOCKS: u64 = MAX_VAULT_SIZE / (BLOCK_SIZE as u64);
 
 /// Superblock magic bytes
 pub const MAGIC_SUPERBLOCK: [u8; 8] = *b"BLKBX\x00\x00\x00";

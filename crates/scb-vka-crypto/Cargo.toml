@@ -20,5 +20,3 @@ scb-vka-memory = { path = "../scb-vka-memory" }
 scb-vka-hsp = { path = "../scb-vka-hsp" }
 
 [features]
-# test-kdf: KDF bellek min 256 MiB (test/CI için). Açıkken validate() 256 MB kabul eder.
-test-kdf = []

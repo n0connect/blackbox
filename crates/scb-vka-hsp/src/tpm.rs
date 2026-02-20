@@ -22,11 +22,11 @@ use tss_esapi::{
         resource_handles::Hierarchy,
     },
     structures::{
-        Digest as TpmDigest, KeyedHashScheme, MaxBuffer, PublicBuilder,
-        PublicKeyedHashParameters,
+        Digest as TpmDigest, KeyedHashScheme, MaxBuffer, PublicBuilder, PublicKeyedHashParameters,
     },
     Context, TctiNameConf,
 };
+use zeroize::Zeroize;
 
 /// TPM 2.0 Hardware Enclave
 ///
@@ -85,9 +85,12 @@ impl TpmEnclave {
     ///
     /// The private key material NEVER leaves the TPM.
     fn get_or_create_hmac_key(&self, ctx: &mut Context) -> Result<ObjectHandle, VaultError> {
-        // Check cache first
+        // Check cache first (handle poisoned mutex gracefully)
         {
-            let cache = self.key_handle.lock().unwrap();
+            let cache = self
+                .key_handle
+                .lock()
+                .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
             if let Some(handle) = *cache {
                 return Ok(handle);
             }
@@ -125,9 +128,12 @@ impl TpmEnclave {
 
         let handle = primary_key.key_handle.into();
 
-        // Cache the handle
+        // Cache the handle (handle poisoned mutex gracefully)
         {
-            let mut cache = self.key_handle.lock().unwrap();
+            let mut cache = self
+                .key_handle
+                .lock()
+                .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
             *cache = Some(handle);
         }
 
@@ -150,8 +156,9 @@ impl TpmEnclave {
         input_data.extend_from_slice(b"BLACKBOX_TPM_V1\0"); // 16 bytes domain separator
         input_data.extend_from_slice(ur);
 
-        let buffer = MaxBuffer::try_from(input_data)
+        let buffer = MaxBuffer::try_from(input_data.clone())
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
+        input_data.zeroize();
 
         // Execute HMAC inside TPM
         let hmac_result = ctx
@@ -165,10 +172,11 @@ impl TpmEnclave {
         let mut expander = Sha3_512::new();
         expander.update(b"BLACKBOX_MR_EXPANDER");
         expander.update(hmac_result.as_bytes());
-        let expanded = expander.finalize();
+        let mut expanded = expander.finalize();
 
         let mut mr = [0u8; 64];
         mr.copy_from_slice(&expanded);
+        expanded.zeroize();
 
         Ok(mr)
     }

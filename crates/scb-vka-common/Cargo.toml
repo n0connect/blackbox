@@ -16,4 +16,3 @@ tracing = "0.1.44"
 # No extra dep needed for simple const fn hash.
 
 [features]
-test-kdf = []

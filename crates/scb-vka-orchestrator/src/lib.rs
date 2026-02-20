@@ -18,8 +18,8 @@ use std::path::{Path, PathBuf};
 use scb_vka_common::config::{
     BLOCK_SIZE, CRYPTO_VERSION, DATA_REGION_START, HEADER_SLOT_A_OFFSET, HEADER_SLOT_B_OFFSET,
     HEADER_SLOT_CAPACITY, HEADER_SLOT_META_SIZE, KDF_ITERATIONS_MIN, KDF_MEMORY_KIB_MIN,
-    KDF_PARALLELISM, MAC_LEN, MIN_TOTAL_BLOCKS, NONCE_LEN, SALT_LEN, STREAM_CHUNK_SIZE,
-    SUPERBLOCK_SIZE, TAG_LEN, VID_LEN, WRAPPED_DEK_SIZE,
+    KDF_PARALLELISM, MAC_LEN, MIN_PASSWORD_LEN, MIN_TOTAL_BLOCKS, NONCE_LEN, SALT_LEN,
+    STREAM_CHUNK_SIZE, SUPERBLOCK_SIZE, TAG_LEN, VID_LEN, WRAPPED_DEK_SIZE,
 };
 pub use scb_vka_common::error::{VaultError, VaultErrorKind};
 use scb_vka_crypto::engine::{
@@ -183,6 +183,11 @@ impl DefaultVaultManager {
 impl VaultManager for DefaultVaultManager {
     #[instrument(skip(self, password))]
     fn create_vault(&self, path: &Path, password: &[u8]) -> Result<VaultInfo, VaultError> {
+        // Enforce minimum password length for security
+        if password.len() < MIN_PASSWORD_LEN {
+            return Err(VaultError::new(VaultErrorKind::InvalidInput));
+        }
+
         let salt_vec = self.crypto.csprng(SALT_LEN)?;
         let mut salt = [0u8; SALT_LEN];
         salt.copy_from_slice(&salt_vec);
@@ -430,13 +435,13 @@ impl VaultManager for DefaultVaultManager {
 
         if bytes_written != encrypted_payload_size {
             // Full rollback: deallocate space (DEK is discarded, data is shredded)
-            if session
+            // CRITICAL: Propagate deallocation errors - space leaks corrupt bitmap state
+            session
                 .space_manager
                 .deallocate(start_block, num_blocks)
-                .is_err()
-            {
-                error!("Space leak during rollback: failed to deallocate blocks");
-            }
+                .inspect_err(|_| {
+                    error!("CRITICAL: Space leak during rollback - bitmap inconsistent");
+                })?;
             return Err(VaultError::new(VaultErrorKind::IoError));
         }
 
@@ -449,10 +454,16 @@ impl VaultManager for DefaultVaultManager {
         let t_len = type_bytes.len().min(32);
         obj_type_arr[..t_len].copy_from_slice(&type_bytes[..t_len]);
 
+        // Safe conversion: validate block indices fit in u32 (prevents silent overflow)
+        let start_block_u32 = u32::try_from(start_block)
+            .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
+        let num_blocks_u32 = u32::try_from(num_blocks)
+            .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
+
         let entry = FileTableEntry::new(
             oid_bytes,
-            start_block as u32,
-            num_blocks as u32,
+            start_block_u32,
+            num_blocks_u32,
             data_len, // Storing PLAINTEXT size
             timestamp,
             obj_type_arr,
@@ -753,7 +764,10 @@ impl VaultManager for DefaultVaultManager {
             }
 
             // Update entry with new contiguous position
-            entry.set_start_block(next_free_block as u32);
+            // CRITICAL: Validate block index fits in u32 to prevent silent overflow
+            let new_start_block = u32::try_from(next_free_block)
+                .map_err(|_| VaultError::new(VaultErrorKind::CapacityExceeded))?;
+            entry.set_start_block(new_start_block);
             next_free_block += num_blocks;
         }
 
@@ -816,6 +830,13 @@ impl VaultManager for DefaultVaultManager {
 /// Maximum header blob size — bounded by slot capacity
 const MAX_HEADER_BLOB_SIZE: usize = (HEADER_SLOT_CAPACITY as usize) - HEADER_SLOT_META_SIZE;
 
+/// Encryption overhead: WRAPPED_DEK(72) + NONCE(24) + TAG(16) = 112 bytes
+/// ChaCha20 is stream cipher: ciphertext.len() == plaintext.len()
+const HEADER_ENCRYPTION_OVERHEAD: usize = WRAPPED_DEK_SIZE + NONCE_LEN + TAG_LEN;
+
+/// Maximum plaintext size for header (accounting for encryption overhead)
+const MAX_HEADER_PLAINTEXT_SIZE: usize = MAX_HEADER_BLOB_SIZE - HEADER_ENCRYPTION_OVERHEAD;
+
 #[allow(clippy::too_many_arguments)]
 fn write_encrypted_header(
     file: &mut File,
@@ -845,7 +866,9 @@ fn write_encrypted_header(
         .and_then(|x| x.checked_add(entries_size))
         .ok_or(VaultError::new(VaultErrorKind::CapacityExceeded))?;
 
-    if plaintext_size > MAX_HEADER_BLOB_SIZE {
+    // CRITICAL: Check against max PLAINTEXT size (not blob size)
+    // blob_size = plaintext_size + ENCRYPTION_OVERHEAD
+    if plaintext_size > MAX_HEADER_PLAINTEXT_SIZE {
         return Err(VaultError::new(VaultErrorKind::CapacityExceeded));
     }
 
@@ -1031,8 +1054,10 @@ fn read_encrypted_header(
 
     match (slot_a, slot_b) {
         (Ok((ha, fta, sma)), Ok((hb, ftb, smb))) => {
-            // Both valid: pick the one with the higher epoch (handling u32 wrap-around)
-            if (hb.epoch().wrapping_sub(ha.epoch()) as i32) >= 0 {
+            // Both valid: pick the one with the higher epoch
+            // CRITICAL: Use proper u64 comparison - epochs increment monotonically
+            // and checked_add prevents overflow, so simple > comparison is correct
+            if hb.epoch() > ha.epoch() {
                 Ok((hb, ftb, smb, HEADER_SLOT_B_OFFSET))
             } else {
                 Ok((ha, fta, sma, HEADER_SLOT_A_OFFSET))

@@ -11,6 +11,7 @@
 //!
 //! İlk 256 block metadata için ayrılmış (superblock + header region).
 
+use scb_vka_common::config::MAX_TOTAL_BLOCKS;
 use scb_vka_common::error::{VaultError, VaultErrorKind};
 
 /// Reserved blocks for metadata (DATA_REGION_START / BLOCK_SIZE)
@@ -80,6 +81,11 @@ impl SpaceManager {
             .total_blocks
             .checked_add(additional_blocks)
             .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
+
+        // CRITICAL: Enforce vault size limit to prevent unbounded growth
+        if new_total > MAX_TOTAL_BLOCKS {
+            return Err(VaultError::new(VaultErrorKind::CapacityExceeded));
+        }
 
         let current_bytes = self.bitmap.len();
         let new_bytes = (new_total as usize).div_ceil(8);

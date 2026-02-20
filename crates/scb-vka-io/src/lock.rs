@@ -147,8 +147,11 @@ impl Drop for VaultLock {
         let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
 
         unsafe {
-            // Ignore errors on drop - best effort unlock
-            let _ = UnlockFileEx(handle, 0, u32::MAX, u32::MAX, &mut overlapped);
+            let result = UnlockFileEx(handle, 0, u32::MAX, u32::MAX, &mut overlapped);
+            if result == 0 {
+                // Log unlock failure - file may remain locked until process exits
+                tracing::error!("Failed to release file lock - may require process restart");
+            }
         }
     }
 }
