@@ -143,6 +143,9 @@ impl MacOSEnclave {
             let sec_key_ref = SecKeyCreateRandomKey(attributes.as_concrete_TypeRef(), &mut error);
 
             if sec_key_ref.is_null() {
+                if !error.is_null() {
+                    core_foundation::base::CFRelease(error as core_foundation::base::CFTypeRef);
+                }
                 return Err(VaultError::new(VaultErrorKind::OperationFailed));
             }
 
@@ -207,6 +210,9 @@ impl MacOSEnclave {
             );
 
             if pub_key_ref.is_null() {
+                if !error.is_null() {
+                    core_foundation::base::CFRelease(error as core_foundation::base::CFTypeRef);
+                }
                 return Err(VaultError::new(VaultErrorKind::OperationFailed));
             }
 
@@ -239,6 +245,9 @@ impl MacOSEnclave {
             );
 
             if shared_secret_ref.is_null() {
+                if !error.is_null() {
+                    core_foundation::base::CFRelease(error as core_foundation::base::CFTypeRef);
+                }
                 return Err(VaultError::new(VaultErrorKind::OperationFailed));
             }
 

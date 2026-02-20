@@ -13,7 +13,6 @@
 use crate::HardwareEnclave;
 use scb_vka_common::error::{VaultError, VaultErrorKind};
 use sha3::{Digest, Sha3_512};
-use std::sync::Mutex;
 use tss_esapi::{
     attributes::ObjectAttributesBuilder,
     handles::ObjectHandle,
@@ -35,8 +34,6 @@ use zeroize::Zeroize;
 pub struct TpmEnclave {
     /// TCTI connection string
     tcti: String,
-    /// Cached key handle (lazily initialized)
-    key_handle: Mutex<Option<ObjectHandle>>,
 }
 
 impl TpmEnclave {
@@ -61,10 +58,7 @@ impl TpmEnclave {
             }
         };
 
-        Self {
-            tcti,
-            key_handle: Mutex::new(None),
-        }
+        Self { tcti }
     }
 
     /// Connect to TPM and return a context
@@ -76,7 +70,7 @@ impl TpmEnclave {
         Context::new(tcti_conf).map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))
     }
 
-    /// Create or retrieve the HMAC primary key in TPM.
+    /// Create the HMAC primary key in TPM.
     ///
     /// The key is created with:
     /// - Algorithm: HMAC-SHA256 (hardware accelerated)
@@ -84,18 +78,7 @@ impl TpmEnclave {
     /// - Attributes: sign_encrypt, sensitive_data_origin, user_with_auth
     ///
     /// The private key material NEVER leaves the TPM.
-    fn get_or_create_hmac_key(&self, ctx: &mut Context) -> Result<ObjectHandle, VaultError> {
-        // Check cache first (handle poisoned mutex gracefully)
-        {
-            let cache = self
-                .key_handle
-                .lock()
-                .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
-            if let Some(handle) = *cache {
-                return Ok(handle);
-            }
-        }
-
+    fn create_primary_hmac_key(&self, ctx: &mut Context) -> Result<ObjectHandle, VaultError> {
         // Build HMAC key template
         let object_attributes = ObjectAttributesBuilder::new()
             .with_sign_encrypt(true)
@@ -127,16 +110,6 @@ impl TpmEnclave {
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
 
         let handle = primary_key.key_handle.into();
-
-        // Cache the handle (handle poisoned mutex gracefully)
-        {
-            let mut cache = self
-                .key_handle
-                .lock()
-                .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
-            *cache = Some(handle);
-        }
-
         Ok(handle)
     }
 
@@ -146,7 +119,7 @@ impl TpmEnclave {
     /// and the result is returned. The hardware key NEVER leaves the TPM.
     fn execute_tpm_hmac(&self, ur: &[u8; 64]) -> Result<[u8; 64], VaultError> {
         let mut ctx = self.connect()?;
-        let key_handle = self.get_or_create_hmac_key(&mut ctx)?;
+        let key_handle = self.create_primary_hmac_key(&mut ctx)?;
 
         // TPM HMAC has a max buffer size, so we may need to hash in chunks
         // For 64 bytes, we're well within the limit (typically 1024+ bytes)
