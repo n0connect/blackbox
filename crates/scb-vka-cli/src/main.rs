@@ -99,16 +99,10 @@ enum Commands {
 // HELPER FUNCTIONS
 // =============================================================================
 
-/// Parse hex string to 16-byte object ID
+/// Parse hex string to 16-byte object ID (delegates to shared common utility)
 pub fn parse_object_id(s: &str) -> Result<[u8; 16]> {
-    let s = s.trim().trim_start_matches("0x");
-    if s.len() != 32 {
-        anyhow::bail!("ID must be 32 hex characters (got {})", s.len());
-    }
-    let bytes = hex::decode(s).context("Invalid hex characters in ID")?;
-    let mut buf = [0u8; 16];
-    buf.copy_from_slice(&bytes);
-    Ok(buf)
+    scb_vka_common::util::parse_hex_object_id(s)
+        .map_err(|_| anyhow::anyhow!("ID must be 32 hex characters"))
 }
 
 /// Prompt for password with optional confirmation.
@@ -230,7 +224,7 @@ fn cmd_add(
             (Box::new(file), len)
         }
         (_, Some(d)) => {
-            let len = d.len() as u64;
+            let len = u64::try_from(d.len()).context("Data too large")?;
             debug!("Reading from inline data ({} bytes)", len);
             (Box::new(std::io::Cursor::new(d.into_bytes())), len)
         }
@@ -445,7 +439,7 @@ fn run() -> Result<()> {
         }
     } else {
         // Fallback if no command provided (useful if only running flags like --CLEANHWKEYS is expected)
-        println!("No command specificed. Use --help for usage.");
+        println!("No command specified. Use --help for usage.");
         Ok(())
     }
 }

@@ -75,6 +75,12 @@ impl ConsumedNonce {
     pub fn new(nonce: Nonce) -> Self {
         Self(nonce)
     }
+
+    /// Access the inner nonce bytes (read-only).
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8; 24] {
+        self.0.as_bytes()
+    }
 }
 
 /// Strict AAD Builder
@@ -493,7 +499,10 @@ impl CryptoEngine for DefaultCryptoEngine {
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
 
         let mut tag = [0u8; TAG_LEN];
-        let ct_len = ciphertext.len() - TAG_LEN;
+        let ct_len = ciphertext
+            .len()
+            .checked_sub(TAG_LEN)
+            .ok_or(VaultError::new(VaultErrorKind::OperationFailed))?;
         tag.copy_from_slice(&ciphertext[ct_len..]);
 
         Ok((ciphertext[..ct_len].to_vec(), tag))
@@ -533,12 +542,14 @@ impl CryptoEngine for DefaultCryptoEngine {
         aad: &AadContext,
     ) -> Result<[u8; NONCE_LEN + KEY_LEN + TAG_LEN], VaultError> {
         let nonce = NonceFactory::generate()?;
+        // Save nonce bytes BEFORE consuming — Nonce is not Copy.
+        let nonce_bytes_saved = *nonce.as_bytes();
         let consumed = ConsumedNonce::new(nonce);
 
         let (ct, tag) = self.encrypt_object(kek, dek.as_bytes(), aad, consumed)?;
 
         let mut output = [0u8; NONCE_LEN + KEY_LEN + TAG_LEN];
-        output[..NONCE_LEN].copy_from_slice(nonce.as_bytes());
+        output[..NONCE_LEN].copy_from_slice(&nonce_bytes_saved);
         output[NONCE_LEN..NONCE_LEN + KEY_LEN].copy_from_slice(&ct);
         output[NONCE_LEN + KEY_LEN..].copy_from_slice(&tag);
 
@@ -628,7 +639,7 @@ impl CryptoEngine for DefaultCryptoEngine {
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
         let mut total_written = 0u64;
         let mut chunk_index = 0u64;
-        let base_nonce_bytes = base_nonce.0.as_bytes(); // base_nonce is consumed here conceptually
+        let base_nonce_bytes = base_nonce.as_bytes(); // Access via public getter
 
         let mut mac = <HmacSha3_256 as hmac::Mac>::new_from_slice(dek.as_bytes())
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;

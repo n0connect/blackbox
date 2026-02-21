@@ -88,6 +88,9 @@ impl Superblock {
         if self.total_blocks < scb_vka_common::config::MIN_TOTAL_BLOCKS {
             return Err(VaultError::new(VaultErrorKind::IntegrityError));
         }
+        if self.total_blocks > scb_vka_common::config::MAX_TOTAL_BLOCKS {
+            return Err(VaultError::new(VaultErrorKind::IntegrityError));
+        }
         Ok(())
     }
 
@@ -263,9 +266,22 @@ impl FileTableEntry {
         }
     }
 
-    /// Parse
+    /// Parse and Validate
     pub fn parse(bytes: &[u8]) -> Result<Self, VaultError> {
-        FileTableEntry::read_from(bytes).ok_or(VaultError::new(VaultErrorKind::IntegrityError))
+        let entry = FileTableEntry::read_from(bytes)
+            .ok_or(VaultError::new(VaultErrorKind::IntegrityError))?;
+        entry.validate()?;
+        Ok(entry)
+    }
+
+    /// Validate entry fields
+    fn validate(&self) -> Result<(), VaultError> {
+        // flags == 0 means deleted (should not appear in active file table)
+        // flags == 1 means active
+        if self.flags != 1 {
+            return Err(VaultError::new(VaultErrorKind::IntegrityError));
+        }
+        Ok(())
     }
 
     // Getters

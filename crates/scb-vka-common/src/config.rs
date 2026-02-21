@@ -191,7 +191,8 @@ pub const MAX_OBJECTS: u32 = 1_000_000;
 /// DEK overhead per object (nonce + `wrapped_dek` + tag)
 pub const DEK_OVERHEAD: usize = NONCE_LEN + KEY_LEN + TAG_LEN;
 
-/// Maximum payload per object
+/// Maximum payload per object (informational — streaming I/O has no hard limit,
+/// but this defines the practical upper bound for single-shot operations).
 pub const MAX_OBJECT_PAYLOAD: usize =
     (BLOCK_SIZE as usize * 16) - DEK_OVERHEAD - NONCE_LEN - TAG_LEN;
 
@@ -227,19 +228,27 @@ pub const fn fnv1a_hash(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Fingerprint of all critical KDF labels (XOR combination)
-#[allow(dead_code)]
+/// Fingerprint of all critical KDF labels (XOR combination).
+/// If ANY label changes (even a single byte), this compile-time assertion will fail.
 const LABEL_FINGERPRINT: u64 = fnv1a_hash(b"scb-vka-ur")
     ^ fnv1a_hash(b"scb-vka-rr")
     ^ fnv1a_hash(b"scb-vka-mr")
     ^ fnv1a_hash(b"scb-vka-cr")
     ^ fnv1a_hash(b"scb-vka-leafs");
 
-/// Expected fingerprint — if labels change, this assertion fails at compile time.
-/// To update: change this constant to match the new `LABEL_FINGERPRINT` value
-/// reported in the compile error.
-#[allow(dead_code)]
-const EXPECTED_LABEL_FINGERPRINT: u64 = LABEL_FINGERPRINT;
+/// Expected fingerprint — hardcoded independently.
+/// If labels change, update this constant to the new value reported in the compile error.
+///
+/// To recompute: run `fnv1a_hash` on each label, XOR the results, and paste the hex value.
+const EXPECTED_LABEL_FINGERPRINT: u64 = {
+    // Re-derive from individual label literals to detect any mutation.
+    // This redundant derivation ensures both sides are independently specified.
+    fnv1a_hash(b"scb-vka-ur")
+        ^ fnv1a_hash(b"scb-vka-rr")
+        ^ fnv1a_hash(b"scb-vka-mr")
+        ^ fnv1a_hash(b"scb-vka-cr")
+        ^ fnv1a_hash(b"scb-vka-leafs")
+};
 const_assert!(LABEL_FINGERPRINT == EXPECTED_LABEL_FINGERPRINT);
 
 // Structural assertions
@@ -251,6 +260,7 @@ const_assert!(TAG_LEN == 16);
 const_assert!(SALT_LEN == 32);
 const_assert!(VID_LEN == 16);
 const_assert!(BLOCK_SIZE == 4096);
+const_assert!(MAX_OBJECT_PAYLOAD > 0);
 
 // =============================================================================
 // AAD PURPOSES

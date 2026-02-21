@@ -26,16 +26,10 @@ use scb_vka_orchestrator::{VaultManager, VaultSession};
 // HELPER FUNCTIONS
 // =============================================================================
 
-/// Parse hex string to 16-byte object ID
+/// Parse hex string to 16-byte object ID (delegates to shared common utility)
 fn parse_object_id(s: &str) -> Result<[u8; 16]> {
-    let s = s.trim().trim_start_matches("0x");
-    if s.len() != 32 {
-        anyhow::bail!("ID must be 32 hex characters (got {})", s.len());
-    }
-    let bytes = hex::decode(s).context("Invalid hex characters in ID")?;
-    let mut buf = [0u8; 16];
-    buf.copy_from_slice(&bytes);
-    Ok(buf)
+    scb_vka_common::util::parse_hex_object_id(s)
+        .map_err(|_| anyhow::anyhow!("ID must be 32 hex characters"))
 }
 
 // =============================================================================
@@ -227,38 +221,60 @@ where
             return;
         }
 
-        let (type_name, purpose, data, len): (&str, &str, Vec<u8>, u64) = if parts[1] == "-f" {
+        if parts[1] == "-f" {
             if parts.len() < 5 {
                 println!("{}: add -f <file> <type> <purpose>", "Usage".yellow());
                 return;
             }
             let file_path = parts[2];
-            match std::fs::read(file_path) {
-                Ok(data) => {
-                    let len = data.len() as u64;
-                    (parts[3], parts[4], data, len)
+            let type_name = parts[3];
+            let purpose = parts[4];
+
+            // S1: Use streaming I/O instead of reading entire file into memory
+            let file = match std::fs::File::open(file_path) {
+                Ok(f) => f,
+                Err(e) => {
+                    println!("{}: {}", "Failed to open file".red(), e);
+                    return;
+                }
+            };
+            let len = match file.metadata() {
+                Ok(m) => m.len(),
+                Err(e) => {
+                    println!("{}: {}", "Failed to read file metadata".red(), e);
+                    return;
+                }
+            };
+
+            let mut reader: Box<dyn std::io::Read> = Box::new(file);
+            match self
+                .manager
+                .add_object(&mut self.session, type_name, purpose, len, &mut reader)
+            {
+                Ok(object_id) => {
+                    println!("{}: {}", "Added".green(), hex::encode(object_id));
                 }
                 Err(e) => {
-                    println!("{}: {}", "Failed to read file".red(), e);
-                    return;
+                    println!("{}: {:?}", "Failed to add object".red(), e.kind);
                 }
             }
         } else {
+            let type_name = parts[1];
+            let purpose = parts[2];
             let data = parts[3..].join(" ").into_bytes();
             let len = data.len() as u64;
-            (parts[1], parts[2], data, len)
-        };
 
-        let mut reader = std::io::Cursor::new(data);
-        match self
-            .manager
-            .add_object(&mut self.session, type_name, purpose, len, &mut reader)
-        {
-            Ok(object_id) => {
-                println!("{}: {}", "Added".green(), hex::encode(object_id));
-            }
-            Err(e) => {
-                println!("{}: {:?}", "Failed to add object".red(), e.kind);
+            let mut reader = std::io::Cursor::new(data);
+            match self
+                .manager
+                .add_object(&mut self.session, type_name, purpose, len, &mut reader)
+            {
+                Ok(object_id) => {
+                    println!("{}: {}", "Added".green(), hex::encode(object_id));
+                }
+                Err(e) => {
+                    println!("{}: {:?}", "Failed to add object".red(), e.kind);
+                }
             }
         }
     }
@@ -317,10 +333,7 @@ where
     }
 
     fn cmd_vacuum(self) -> Result<()> {
-        println!(
-            "{}",
-            "Vacuuming vault (this may take a while)...".yellow()
-        );
+        println!("{}", "Vacuuming vault (this may take a while)...".yellow());
 
         match self.manager.vacuum_vault(self.session, &self.path) {
             Ok(_) => {

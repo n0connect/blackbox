@@ -89,7 +89,7 @@ impl CryptoVersion {
 }
 
 /// Strict Nonce (24 bytes)
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 #[repr(transparent)]
 #[must_use]
 pub struct Nonce([u8; 24]);

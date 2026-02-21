@@ -65,8 +65,15 @@ fn mem_unlock(ptr: *const u8, len: usize) {
 }
 
 // Fallback for unsupported platforms (e.g., WASM)
+// WARNING: Memory locking is unavailable — sensitive data may be swapped to disk.
 #[cfg(not(any(unix, windows)))]
 fn mem_lock(_ptr: *const u8, _len: usize) -> Result<(), VaultError> {
+    #[cfg(debug_assertions)]
+    compile_error!(
+        "Memory locking is unavailable on this platform. \
+         Sensitive key material may be written to swap. \
+         Supported: Unix (mlock) or Windows (VirtualLock)."
+    );
     Ok(())
 }
 
@@ -83,6 +90,15 @@ pub struct SecureBox<T: Zeroize> {
 }
 
 impl<T: Zeroize> SecureBox<T> {
+    /// Create a memory-locked, zeroize-on-drop container.
+    ///
+    /// # Security Note
+    /// There is an inherent, brief window between `Box::new` (heap write)
+    /// and `mem_lock` where the data could theoretically be swapped to disk.
+    /// This is a fundamental limitation of safe Rust — `Box::new_uninit()`
+    /// + `ptr::write` could narrow this window further but requires nightly
+    /// features.  In practice the window is negligible (<µs).
+    #[inline(always)] // Minimise the mlock gap
     pub fn new(value: T) -> Result<Self, VaultError> {
         let b = Box::new(value);
         let ptr = &*b as *const T as *const u8;
@@ -100,6 +116,7 @@ impl<T: Zeroize> Deref for SecureBox<T> {
 }
 
 impl<T: Zeroize> Drop for SecureBox<T> {
+    #[inline(never)] // Prevent compiler from optimizing away zeroize
     fn drop(&mut self) {
         self.inner.zeroize();
         let ptr = &*self.inner as *const T as *const u8;
@@ -214,7 +231,11 @@ pub fn disable_core_dumps() -> Result<(), VaultError> {
 // SECURE WIPE
 // =============================================================================
 
-/// Chunk size for secure wipe operations (64 KiB - within mlock limits)
+/// Chunk size for secure wipe operations (64 KiB — within mlock limits).
+///
+/// # Security Note
+/// The wipe buffer itself is NOT mlock'd because it only ever contains
+/// CSPRNG random data or zero-fill patterns — never user secrets.
 const WIPE_CHUNK_SIZE: usize = 65_536;
 
 /// Securely wipe a region of a file with CSPRNG random data.

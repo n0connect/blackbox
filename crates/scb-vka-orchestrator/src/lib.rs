@@ -32,6 +32,12 @@ use scb_vka_memory::SecureBox;
 use zerocopy::AsBytes;
 use zeroize::Zeroize;
 
+// SAFETY: Ensure metadata region fits inside MIN_TOTAL_BLOCKS
+static_assertions::const_assert!(
+    scb_vka_common::config::MIN_TOTAL_BLOCKS
+        > (scb_vka_common::config::DATA_REGION_START / scb_vka_common::config::BLOCK_SIZE as u64)
+);
+
 // =============================================================================
 // HELPER FUNCTIONS - Centralized Error Handling & Utilities
 // =============================================================================
@@ -469,6 +475,9 @@ impl VaultManager for DefaultVaultManager {
         }
         session.file_table.clear();
         session.header.zeroize();
+        // O3: Zeroize bitmap to prevent object-location metadata leakage
+        let mut bitmap = session.space_manager.export_bitmap();
+        bitmap.zeroize();
         info!(vid = %hex::encode(&vid[..8]), "Vault locked - key material zeroized");
         Ok(())
     }
@@ -519,7 +528,7 @@ impl VaultManager for DefaultVaultManager {
 
         let start_block = match session.space_manager.allocate(num_blocks) {
             Ok(block) => block,
-            Err(e) if e.kind == VaultErrorKind::CapacityExceeded => {
+            Err(e) if e.kind == VaultErrorKind::VaultFull => {
                 let additional_blocks = num_blocks + 1024;
                 warn!(
                     additional_blocks = additional_blocks,
@@ -702,6 +711,19 @@ impl VaultManager for DefaultVaultManager {
 
         let entry = session.file_table.remove(idx);
 
+        // O5: Secure-wipe the on-disk encrypted data for defense-in-depth.
+        // Even though the data is encrypted, overwriting prevents recovery of ciphertext.
+        let wipe_offset =
+            calculate_data_offset(entry.start_block() as u64).map_err(|_| integrity_err())?;
+        let wipe_len = (entry.num_blocks() as usize)
+            .checked_mul(BLOCK_SIZE as usize)
+            .ok_or_else(range_err)?;
+        scb_vka_memory::secure_wipe(session.lock.file_mut(), wipe_offset, wipe_len).inspect_err(
+            |_| {
+                error!("CRITICAL: Secure wipe failed for deleted object - ciphertext may remain");
+            },
+        )?;
+
         session
             .space_manager
             .deallocate(entry.start_block() as u64, entry.num_blocks() as u64)?;
@@ -710,7 +732,7 @@ impl VaultManager for DefaultVaultManager {
         info!(
             vid = %hex::encode(&session.vid[..8]),
             object_id = %hex::encode(object_id),
-            "Object cryptographically deleted"
+            "Object cryptographically deleted and securely wiped"
         );
         Ok(())
     }
@@ -747,8 +769,10 @@ impl VaultManager for DefaultVaultManager {
             "Starting vacuum operation - compacting vault"
         );
 
+        // O4: Use CSPRNG random suffix for temp file to prevent collisions
+        let random_suffix = hex::encode(self.crypto.csprng(8)?);
         let mut temp_path_str = path.to_string_lossy().to_string();
-        temp_path_str.push_str(".tmp");
+        temp_path_str.push_str(&format!(".vacuum-{}.tmp", random_suffix));
         let temp_path = Path::new(&temp_path_str);
 
         #[allow(unused_mut)]

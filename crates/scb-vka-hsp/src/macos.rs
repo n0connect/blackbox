@@ -168,8 +168,12 @@ impl MacOSEnclave {
 
             if sec_key_ref.is_null() {
                 let error_desc = if !error.is_null() {
-                    // Try to get error description before releasing
-                    let desc = format!("{:?}", error);
+                    // Redact detailed error info in release builds
+                    let desc = if cfg!(debug_assertions) {
+                        format!("{:?}", error)
+                    } else {
+                        "[redacted]".to_string()
+                    };
                     core_foundation::base::CFRelease(error as core_foundation::base::CFTypeRef);
                     desc
                 } else {
@@ -289,7 +293,11 @@ impl MacOSEnclave {
 
             if pub_key_ref.is_null() {
                 let error_desc = if !error.is_null() {
-                    let desc = format!("{:?}", error);
+                    let desc = if cfg!(debug_assertions) {
+                        format!("{:?}", error)
+                    } else {
+                        "[redacted]".to_string()
+                    };
                     core_foundation::base::CFRelease(error as core_foundation::base::CFTypeRef);
                     desc
                 } else {
@@ -332,7 +340,11 @@ impl MacOSEnclave {
 
             if shared_secret_ref.is_null() {
                 let error_desc = if !error.is_null() {
-                    let desc = format!("{:?}", error);
+                    let desc = if cfg!(debug_assertions) {
+                        format!("{:?}", error)
+                    } else {
+                        "[redacted]".to_string()
+                    };
                     core_foundation::base::CFRelease(error as core_foundation::base::CFTypeRef);
                     desc
                 } else {
@@ -382,17 +394,19 @@ impl HardwareEnclave for MacOSEnclave {
         // Shared secret is computed INSIDE the Secure Enclave
         let shared_secret = self.perform_ecdh(&peer_public_key)?;
 
-        // Step 4: Expand shared secret to 64-byte MR
+        // Step 4: Expand shared secret to 64-byte MR using Zeroizing wrapper
         let mut expander = Sha3_512::new();
         expander.update(MR_EXPANDER_DOMAIN);
         expander.update(shared_secret.as_ref() as &[u8]);
         let mut expansion = expander.finalize();
 
-        let mut mr = [0u8; 64];
+        let mut mr = zeroize::Zeroizing::new([0u8; 64]);
         mr.copy_from_slice(&expansion);
         expansion.zeroize();
 
-        Ok(mr)
+        // Return owned value — Zeroizing wrapper ensures cleanup on error paths
+        let result = *mr;
+        Ok(result)
     }
 
     fn provider_name(&self) -> &'static str {

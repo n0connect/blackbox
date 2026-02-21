@@ -20,6 +20,10 @@ pub const RESERVED_BLOCKS: u64 = 256;
 pub struct SpaceManager {
     bitmap: Vec<u8>,
     total_blocks: u64,
+    /// Hint for the first potentially free block index.
+    /// Allocation scans from here instead of block 0.  The hint is conservative
+    /// (may point to an allocated block) but never past a free block.
+    first_free_hint: u64,
 }
 
 impl SpaceManager {
@@ -44,6 +48,7 @@ impl SpaceManager {
         Ok(Self {
             bitmap,
             total_blocks,
+            first_free_hint: reserved,
         })
     }
 
@@ -56,6 +61,7 @@ impl SpaceManager {
         Ok(Self {
             bitmap: bytes,
             total_blocks,
+            first_free_hint: RESERVED_BLOCKS,
         })
     }
 
@@ -98,6 +104,8 @@ impl SpaceManager {
     }
 
     /// Allocate contiguous blocks. Returns starting block index.
+    ///
+    /// Scans from `first_free_hint` for O(1) amortised best-case allocation.
     pub fn allocate(&mut self, count: u64) -> Result<u64, VaultError> {
         if count == 0 {
             return Err(VaultError::new(VaultErrorKind::ParameterOutOfRange));
@@ -106,7 +114,7 @@ impl SpaceManager {
         let mut consecutive = 0u64;
         let mut start_candidate = 0u64;
 
-        for block_idx in 0..self.total_blocks {
+        for block_idx in self.first_free_hint..self.total_blocks {
             let byte_idx = (block_idx / 8) as usize;
             let bit_idx = (block_idx % 8) as usize;
 
@@ -124,6 +132,8 @@ impl SpaceManager {
                 consecutive += 1;
                 if consecutive == count {
                     self.mark_range(start_candidate, count, true)?;
+                    // Advance hint past the allocated region
+                    self.first_free_hint = start_candidate + count;
                     return Ok(start_candidate);
                 }
             } else {
@@ -136,8 +146,12 @@ impl SpaceManager {
 
     /// Deallocate blocks
     pub fn deallocate(&mut self, start: u64, count: u64) -> Result<(), VaultError> {
-        // mark_range already does bounds checking
-        self.mark_range(start, count, false)
+        self.mark_range(start, count, false)?;
+        // Move hint back so freed space can be found
+        if start < self.first_free_hint {
+            self.first_free_hint = start;
+        }
+        Ok(())
     }
 
     fn mark_range(&mut self, start: u64, count: u64, value: bool) -> Result<(), VaultError> {
