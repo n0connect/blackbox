@@ -31,7 +31,32 @@ fn parse_object_id(s: &str) -> Result<[u8; 16]> {
     scb_vka_common::util::parse_hex_object_id(s)
         .map_err(|_| anyhow::anyhow!("ID must be 32 hex characters"))
 }
+// =============================================================================
+// SHELL TOKENIZER
+// =============================================================================
 
+fn tokenize_shell_input(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+
+    for c in input.chars() {
+        if c == '"' {
+            in_quotes = !in_quotes;
+        } else if c.is_whitespace() && !in_quotes {
+            if !current.is_empty() {
+                tokens.push(current.clone());
+                current.clear();
+            }
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
 // =============================================================================
 // SHELL
 // =============================================================================
@@ -73,7 +98,11 @@ where
                     }
                     let _ = self.editor.add_history_entry(line);
 
-                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    let tokens = tokenize_shell_input(line);
+                    let parts: Vec<&str> = tokens.iter().map(|s| s.as_str()).collect();
+                    if parts.is_empty() {
+                        continue;
+                    }
                     let cmd = parts[0].to_lowercase();
 
                     match cmd.as_str() {

@@ -27,7 +27,7 @@ use scb_vka_common::error::{VaultError, VaultErrorKind};
 use sha3::{Digest, Sha3_512};
 use std::ptr;
 use std::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use zeroize::Zeroize;
 
 use core_foundation::base::{CFType, TCFType};
@@ -97,6 +97,10 @@ impl MacOSEnclave {
             query.set(
                 CFString::wrap_under_get_rule(kSecClass),
                 CFString::wrap_under_get_rule(kSecClassKey).as_CFType(),
+            );
+            query.set(
+                CFString::wrap_under_get_rule(kSecAttrKeyClass),
+                CFString::wrap_under_get_rule(kSecAttrKeyClassPrivate).as_CFType(),
             );
             query.set(
                 CFString::wrap_under_get_rule(kSecAttrApplicationLabel),
@@ -170,7 +174,7 @@ impl MacOSEnclave {
                 let error_desc = if !error.is_null() {
                     // Redact detailed error info in release builds
                     let desc = if cfg!(debug_assertions) {
-                        format!("{:?}", error)
+                        format!("{error:?}")
                     } else {
                         "[redacted]".to_string()
                     };
@@ -188,30 +192,14 @@ impl MacOSEnclave {
         }
     }
 
-    /// Get or create the Secure Enclave key with TOCTOU protection.
-    ///
-    /// Uses a mutex to prevent race conditions where multiple threads
-    /// could create duplicate keys with the same label.
-    fn get_or_create_key(&self) -> Result<SecKey, VaultError> {
-        // First try without lock (fast path)
+    /// Get the existing Secure Enclave key. Fails if not initialized.
+    fn get_key(&self) -> Result<SecKey, VaultError> {
         if let Some(key) = self.find_existing_key() {
-            return Ok(key);
+            Ok(key)
+        } else {
+            error!("Secure Enclave key not found. Run blackbox init first.");
+            Err(VaultError::new(VaultErrorKind::HardwareUnavailable))
         }
-
-        // Acquire lock for key creation to prevent TOCTOU race
-        let _guard = self.key_creation_lock.lock().map_err(|e| {
-            error!("Key creation mutex poisoned: {:?}", e);
-            VaultError::new(VaultErrorKind::OperationFailed)
-        })?;
-
-        // Double-check after acquiring lock
-        if let Some(key) = self.find_existing_key() {
-            debug!("Key found after acquiring lock (created by another thread)");
-            return Ok(key);
-        }
-
-        // Now safe to create
-        self.create_enclave_key()
     }
 
     /// Convert UR to a valid P-256 public key using hash-to-curve (RFC 9380).
@@ -294,7 +282,7 @@ impl MacOSEnclave {
             if pub_key_ref.is_null() {
                 let error_desc = if !error.is_null() {
                     let desc = if cfg!(debug_assertions) {
-                        format!("{:?}", error)
+                        format!("{error:?}")
                     } else {
                         "[redacted]".to_string()
                     };
@@ -319,7 +307,7 @@ impl MacOSEnclave {
         &self,
         peer_public_key: &SecKey,
     ) -> Result<zeroize::Zeroizing<Vec<u8>>, VaultError> {
-        let private_key = self.get_or_create_key()?;
+        let private_key = self.get_key()?;
 
         unsafe {
             // Use the proper Security framework constant for ECDH
@@ -341,7 +329,7 @@ impl MacOSEnclave {
             if shared_secret_ref.is_null() {
                 let error_desc = if !error.is_null() {
                     let desc = if cfg!(debug_assertions) {
-                        format!("{:?}", error)
+                        format!("{error:?}")
                     } else {
                         "[redacted]".to_string()
                     };
@@ -411,6 +399,31 @@ impl HardwareEnclave for MacOSEnclave {
 
     fn provider_name(&self) -> &'static str {
         "Apple Secure Enclave (SEP) - ECDH"
+    }
+
+    fn init_hardware_keys(&self) -> Result<(), VaultError> {
+        // First try without lock (fast path)
+        if self.find_existing_key().is_some() {
+            info!("Hardware keys already initialized.");
+            return Ok(());
+        }
+
+        // Acquire lock for key creation to prevent TOCTOU race
+        let _guard = self.key_creation_lock.lock().map_err(|e| {
+            error!("Key creation mutex poisoned: {e:?}");
+            VaultError::new(VaultErrorKind::OperationFailed)
+        })?;
+
+        // Double-check after acquiring lock
+        if self.find_existing_key().is_some() {
+            debug!("Key found after acquiring lock (created by another thread)");
+            return Ok(());
+        }
+
+        // Now safe to create
+        let _ = self.create_enclave_key()?;
+        info!("Successfully initialized Secure Enclave keys.");
+        Ok(())
     }
 
     fn clear_hardware_keys(&self) -> Result<(), VaultError> {

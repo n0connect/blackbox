@@ -58,6 +58,9 @@ pub const WRAPPED_DEK_SIZE: usize = NONCE_LEN + KEY_LEN + TAG_LEN;
 /// Global Crypto Scheme Version
 pub const CRYPTO_VERSION: u32 = 1;
 
+/// Vault File Format Version (v1.0.1 represented as `0x01_00_01_00`)
+pub const VERSION: u32 = 0x01_00_01_00;
+
 /// Label for UR derivation
 pub const LABEL_UR: &[u8] = b"scb-vka-ur";
 
@@ -95,8 +98,8 @@ pub const ARGON2_MIN_PARALLELISM: u32 = 1;
 /// Argon2 maximum parallelism
 pub const ARGON2_MAX_PARALLELISM: u32 = 16;
 
-/// KDF Memory minimum (1 GiB - NO COMPROMISE for brute-force resistance)
-pub const KDF_MEMORY_KIB_MIN: u32 = 1_048_576;
+/// KDF Memory minimum (64 MiB - optimized for usability)
+pub const KDF_MEMORY_KIB_MIN: u32 = 65_536;
 
 /// KDF iterations minimum
 pub const KDF_ITERATIONS_MIN: u32 = 3;
@@ -199,7 +202,7 @@ pub const MAX_OBJECT_PAYLOAD: usize =
 /// Stream chunk size (1 MiB)
 pub const STREAM_CHUNK_SIZE: usize = 1024 * 1024;
 
-/// Maximum size for mlock'd SecureBuffer (2 MiB)
+/// Maximum size for mlock'd `SecureBuffer` (2 MiB)
 pub const MAX_SECURE_BUFFER_SIZE: usize = 2 * 1024 * 1024;
 
 /// Default vault path
@@ -230,25 +233,20 @@ pub const fn fnv1a_hash(bytes: &[u8]) -> u64 {
 
 /// Fingerprint of all critical KDF labels (XOR combination).
 /// If ANY label changes (even a single byte), this compile-time assertion will fail.
-const LABEL_FINGERPRINT: u64 = fnv1a_hash(b"scb-vka-ur")
-    ^ fnv1a_hash(b"scb-vka-rr")
-    ^ fnv1a_hash(b"scb-vka-mr")
-    ^ fnv1a_hash(b"scb-vka-cr")
-    ^ fnv1a_hash(b"scb-vka-leafs");
+#[allow(dead_code)]
+const LABEL_FINGERPRINT: u64 = fnv1a_hash(LABEL_UR)
+    ^ fnv1a_hash(LABEL_RR)
+    ^ fnv1a_hash(LABEL_MR)
+    ^ fnv1a_hash(LABEL_CR)
+    ^ fnv1a_hash(LABEL_LEAFS);
 
 /// Expected fingerprint — hardcoded independently.
 /// If labels change, update this constant to the new value reported in the compile error.
 ///
 /// To recompute: run `fnv1a_hash` on each label, XOR the results, and paste the hex value.
-const EXPECTED_LABEL_FINGERPRINT: u64 = {
-    // Re-derive from individual label literals to detect any mutation.
-    // This redundant derivation ensures both sides are independently specified.
-    fnv1a_hash(b"scb-vka-ur")
-        ^ fnv1a_hash(b"scb-vka-rr")
-        ^ fnv1a_hash(b"scb-vka-mr")
-        ^ fnv1a_hash(b"scb-vka-cr")
-        ^ fnv1a_hash(b"scb-vka-leafs")
-};
+#[allow(dead_code)]
+const EXPECTED_LABEL_FINGERPRINT: u64 = 7_769_981_293_564_218_201;
+
 const_assert!(LABEL_FINGERPRINT == EXPECTED_LABEL_FINGERPRINT);
 
 // Structural assertions

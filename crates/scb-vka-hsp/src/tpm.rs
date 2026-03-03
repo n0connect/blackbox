@@ -274,6 +274,12 @@ impl HardwareEnclave for TpmEnclave {
         );
         Ok(())
     }
+
+    fn init_hardware_keys(&self) -> Result<(), VaultError> {
+        // Native TPM implementation handles primary keys dynamically in Owner hierarchy.
+        // No persistent configuration needed.
+        Ok(())
+    }
 }
 
 #[cfg(test)]

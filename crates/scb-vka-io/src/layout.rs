@@ -56,7 +56,7 @@ impl Superblock {
         Self {
             magic: MAGIC_SUPERBLOCK,
             salt,
-            version: 2,
+            version: scb_vka_common::config::VERSION,
             crypto_version: scb_vka_common::config::CRYPTO_VERSION,
             total_blocks,
             block_size: BLOCK_SIZE,
@@ -90,6 +90,12 @@ impl Superblock {
         }
         if self.total_blocks > scb_vka_common::config::MAX_TOTAL_BLOCKS {
             return Err(VaultError::new(VaultErrorKind::IntegrityError));
+        }
+        if self.version != scb_vka_common::config::VERSION {
+            return Err(VaultError::new(VaultErrorKind::InvalidInput));
+        }
+        if self.crypto_version != scb_vka_common::config::CRYPTO_VERSION {
+            return Err(VaultError::new(VaultErrorKind::InvalidInput));
         }
         Ok(())
     }

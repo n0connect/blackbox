@@ -13,6 +13,7 @@
 
 use scb_vka_common::config::MAX_TOTAL_BLOCKS;
 use scb_vka_common::error::{VaultError, VaultErrorKind};
+use zeroize::Zeroize;
 
 /// Reserved blocks for metadata (DATA_REGION_START / BLOCK_SIZE)
 pub const RESERVED_BLOCKS: u64 = 256;
@@ -24,6 +25,15 @@ pub struct SpaceManager {
     /// Allocation scans from here instead of block 0.  The hint is conservative
     /// (may point to an allocated block) but never past a free block.
     first_free_hint: u64,
+}
+
+/// SECURITY: Zeroize bitmap on drop to prevent object-location metadata leaks.
+impl Drop for SpaceManager {
+    fn drop(&mut self) {
+        self.bitmap.zeroize();
+        self.total_blocks = 0;
+        self.first_free_hint = 0;
+    }
 }
 
 impl SpaceManager {
@@ -114,11 +124,14 @@ impl SpaceManager {
         let mut consecutive = 0u64;
         let mut start_candidate = 0u64;
 
-        for block_idx in self.first_free_hint..self.total_blocks {
+        let mut scan_count = 0u64;
+        let scan_limit = self.total_blocks - RESERVED_BLOCKS;
+        let mut block_idx = self.first_free_hint;
+
+        while scan_count < scan_limit {
             let byte_idx = (block_idx / 8) as usize;
             let bit_idx = (block_idx % 8) as usize;
 
-            // Bounds check before indexing
             if byte_idx >= self.bitmap.len() {
                 return Err(VaultError::new(VaultErrorKind::IntegrityError));
             }
@@ -132,13 +145,19 @@ impl SpaceManager {
                 consecutive += 1;
                 if consecutive == count {
                     self.mark_range(start_candidate, count, true)?;
-                    // Advance hint past the allocated region
                     self.first_free_hint = start_candidate + count;
                     return Ok(start_candidate);
                 }
             } else {
                 consecutive = 0;
             }
+
+            block_idx += 1;
+            if block_idx >= self.total_blocks {
+                block_idx = RESERVED_BLOCKS;
+                consecutive = 0; // cannot wrap around contiguous allocation
+            }
+            scan_count += 1;
         }
 
         Err(VaultError::new(VaultErrorKind::VaultFull))

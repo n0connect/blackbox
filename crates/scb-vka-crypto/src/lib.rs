@@ -89,7 +89,12 @@ impl CryptoVersion {
 }
 
 /// Strict Nonce (24 bytes)
-#[derive(Clone, PartialEq, Eq)]
+///
+/// SECURITY: Intentionally does NOT implement Clone or Copy.
+/// Once a nonce is consumed via `ConsumedNonce`, it cannot be reused.
+/// To save nonce bytes before consumption, use `to_bytes()` which returns
+/// an owned copy of the raw bytes (not a Nonce).
+#[derive(PartialEq, Eq)]
 #[repr(transparent)]
 #[must_use]
 pub struct Nonce([u8; 24]);
@@ -99,10 +104,16 @@ impl Nonce {
     pub fn new(bytes: [u8; 24]) -> Self {
         Self(bytes)
     }
-    /// Get as bytes
+    /// Get reference to nonce bytes
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 24] {
         &self.0
+    }
+    /// Extract a raw byte copy for serialization BEFORE consuming.
+    /// Returns owned bytes, not a Nonce — cannot be used for encryption.
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; 24] {
+        self.0
     }
 }
 impl std::fmt::Debug for Nonce {

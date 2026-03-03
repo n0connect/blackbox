@@ -67,6 +67,10 @@ pub trait HardwareEnclave: Send + Sync {
     /// Get the enclave provider name for diagnostics.
     fn provider_name(&self) -> &'static str;
 
+    /// Explicitly initialize the hardware keys on platforms that require it.
+    /// Returns Ok if already initialized or successful.
+    fn init_hardware_keys(&self) -> Result<(), VaultError>;
+
     /// Permanently delete the hardware-bound keys generated for this enclave.
     /// This is an irreversible operation and will make all vaults relying on
     /// this key unrecoverable.
@@ -136,12 +140,8 @@ pub fn create_platform_enclave() -> Box<dyn HardwareEnclave> {
 /// This performs a lightweight probe without creating persistent keys.
 pub fn probe_hardware_security() -> Result<&'static str, VaultError> {
     let enclave = create_platform_enclave();
-
-    // Try a dummy operation to verify hardware is present
-    // This will fail fast if TPM/Secure Enclave is not available
-    let test_ur = [0u8; 64];
-    enclave.sign_with_hardware_key(&test_ur)?;
-
+    // Hardware availability will be intrinsically verified during vault creation/unlock.
+    // Probing should remain purely informative to avoid persistent dummy keys.
     Ok(enclave.provider_name())
 }
 

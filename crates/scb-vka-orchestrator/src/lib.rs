@@ -216,6 +216,9 @@ pub trait VaultManager {
     /// Physically shrink vault by permanently dropping deleted objects out-of-place.
     fn vacuum_vault(&self, session: VaultSession, path: &Path) -> Result<(), VaultError>;
 
+    /// Initialize the hardware-backed cryptographic keys (creates persistent key if missing).
+    fn init_hardware(&self) -> Result<(), VaultError>;
+
     /// Erase all hardware-bound cryptographic keys (e.g., Secure Enclave, TPM) from the system.
     fn clear_hardware_keys(&self) -> Result<(), VaultError>;
 }
@@ -401,29 +404,39 @@ impl VaultManager for DefaultVaultManager {
             .open(path)
             .map_err(|_| io_err())?;
 
-        let total_blocks = MIN_TOTAL_BLOCKS;
-        file.set_len(total_blocks * BLOCK_SIZE as u64)
-            .map_err(|_| io_err())?;
+        let mut do_create = || -> Result<(), VaultError> {
+            let total_blocks = MIN_TOTAL_BLOCKS;
+            file.set_len(total_blocks * BLOCK_SIZE as u64)
+                .map_err(|_| io_err())?;
 
-        let superblock = Superblock::new(salt, vid, timestamp, total_blocks);
+            let superblock = Superblock::new(salt, vid, timestamp, total_blocks);
 
-        file.seek(SeekFrom::Start(0)).map_err(|_| io_err())?;
-        file.write_all(superblock.as_bytes())
-            .map_err(|_| io_err())?;
+            file.seek(SeekFrom::Start(0)).map_err(|_| io_err())?;
+            file.write_all(superblock.as_bytes())
+                .map_err(|_| io_err())?;
 
-        let mut header = VaultHeader::new(CRYPTO_VERSION, 1);
+            let mut header = VaultHeader::new(CRYPTO_VERSION, 1);
 
-        let space_manager = SpaceManager::new(total_blocks)?;
-        write_encrypted_header(
-            &mut file,
-            &kek,
-            &mk,
-            &self.crypto,
-            &mut header,
-            &[],
-            &space_manager,
-            HEADER_SLOT_A_OFFSET,
-        )?;
+            let space_manager = SpaceManager::new(total_blocks)?;
+            write_encrypted_header(
+                &mut file,
+                &kek,
+                &mk,
+                &self.crypto,
+                &mut header,
+                &[],
+                &space_manager,
+                HEADER_SLOT_A_OFFSET,
+            )?;
+
+            Ok(())
+        };
+
+        if let Err(e) = do_create() {
+            drop(file);
+            let _ = std::fs::remove_file(path);
+            return Err(e);
+        }
 
         kek.zeroize();
         mk.zeroize();
@@ -482,6 +495,10 @@ impl VaultManager for DefaultVaultManager {
         Ok(())
     }
 
+    fn init_hardware(&self) -> Result<(), VaultError> {
+        self.enclave.init_hardware_keys()
+    }
+
     fn clear_hardware_keys(&self) -> Result<(), VaultError> {
         self.enclave.clear_hardware_keys()
     }
@@ -498,6 +515,14 @@ impl VaultManager for DefaultVaultManager {
         // Input Validation
         if object_type.contains('\0') || purpose.contains('\0') {
             return Err(VaultError::new(VaultErrorKind::InvalidInput));
+        }
+        if data_len == 0 {
+            return Err(VaultError::new(VaultErrorKind::ParameterOutOfRange));
+        }
+        let max_data_len = scb_vka_common::config::MAX_TOTAL_BLOCKS as u64
+            * scb_vka_common::config::BLOCK_SIZE as u64;
+        if data_len > max_data_len {
+            return Err(VaultError::new(VaultErrorKind::ParameterOutOfRange));
         }
         if session.header.entry_count() >= scb_vka_common::config::MAX_OBJECTS {
             return Err(capacity_err());
@@ -660,7 +685,7 @@ impl VaultManager for DefaultVaultManager {
         let (encrypted_payload_size, _, _) =
             calculate_stream_sizes(data_len).map_err(|_| integrity_err())?;
 
-        let stream_read_size = encrypted_payload_size
+        let _stream_read_size = encrypted_payload_size
             .checked_add(MAC_LEN as u64)
             .ok_or_else(integrity_err)?;
 
@@ -678,11 +703,15 @@ impl VaultManager for DefaultVaultManager {
             .map_err(|_| io_err())?;
 
         let nonce = Nonce::new(nonce_bytes);
-        let mut limited_reader = (session.lock.file_mut()).take(stream_read_size);
 
-        let bytes_written =
-            self.crypto
-                .decrypt_stream(&dek, &mut limited_reader, writer, &aad, nonce, data_len)?;
+        let bytes_written = self.crypto.decrypt_stream(
+            &dek,
+            session.lock.file_mut(),
+            writer,
+            &aad,
+            nonce,
+            data_len,
+        )?;
 
         if bytes_written != data_len {
             return Err(integrity_err());
@@ -856,14 +885,16 @@ impl VaultManager for DefaultVaultManager {
         }
 
         // 4. Update Header State
-        session.header.increment_epoch()?;
         let entry_count = u32::try_from(session.file_table.len()).map_err(|_| capacity_err())?;
         session.header.update_entry_count(entry_count);
+
+        // M-06: Increment epoch explicitly once for the vacuumed vault
+        session.header.increment_epoch()?;
 
         temp_file.sync_all().map_err(|_| io_err())?;
 
         // 5. Write Header to A/B Slots
-        write_encrypted_header(
+        let write_a_result = write_encrypted_header(
             &mut temp_file,
             &session.kek,
             &session.mk,
@@ -872,9 +903,9 @@ impl VaultManager for DefaultVaultManager {
             &session.file_table,
             &new_sm,
             HEADER_SLOT_A_OFFSET,
-        )?;
+        );
 
-        write_encrypted_header(
+        let write_b_result = write_encrypted_header(
             &mut temp_file,
             &session.kek,
             &session.mk,
@@ -883,14 +914,40 @@ impl VaultManager for DefaultVaultManager {
             &session.file_table,
             &new_sm,
             HEADER_SLOT_B_OFFSET,
-        )?;
+        );
 
-        drop(session.lock);
-        temp_file.sync_all().map_err(|_| io_err())?;
+        if write_a_result.is_err() || write_b_result.is_err() || temp_file.sync_all().is_err() {
+            let _ = std::fs::remove_file(temp_path);
+            return Err(io_err());
+        }
+
         drop(temp_file);
 
-        // 6. Atomic Replacement
-        std::fs::rename(temp_path, path).map_err(|_| io_err())?;
+        // 6. Atomic Replacement (C-03, S-04)
+        // Keep session.lock active until rename succeeds so old vault isn't accessed
+        if let Err(e) = std::fs::rename(temp_path, path) {
+            // S-04: Cross-device rename fallback (EXDEV)
+            if let Err(copy_e) = std::fs::copy(temp_path, path) {
+                let _ = std::fs::remove_file(temp_path);
+                error!(
+                    "Vacuum atomic replacement failed (rename: {:?}, copy: {:?}) - old vault is intact",
+                    e, copy_e
+                );
+                return Err(VaultError::new(VaultErrorKind::IoError));
+            }
+            let _ = std::fs::remove_file(temp_path);
+        }
+
+        // Drop the old vault lock only AFTER successful replacement
+        drop(session.lock);
+
+        // M-03: Explicitly zeroize session data after successful vacuum
+        for entry in &mut session.file_table {
+            entry.zeroize_entry();
+        }
+        session.file_table.clear();
+        session.header.zeroize();
+        // session.space_manager and new_sm are zeroized automatically via Drop impl
 
         info!(
             path = %path.display(),
@@ -958,13 +1015,15 @@ fn write_encrypted_header(
 
     let wrapped_dek = crypto.wrap_dek(kek, &dek, &aad)?;
     let nonce = NonceFactory::generate()?;
+    // SECURITY: Save nonce bytes BEFORE consuming — Nonce is non-Copy/non-Clone
+    let nonce_raw = nonce.to_bytes();
     let consumed = ConsumedNonce::new(nonce);
     let (ct, tag) = crypto.encrypt_object(&dek, &plaintext, &aad, consumed)?;
 
     let blob_size = WRAPPED_DEK_SIZE + NONCE_LEN + ct.len() + TAG_LEN;
     let mut blob = Vec::with_capacity(blob_size);
     blob.extend_from_slice(&wrapped_dek);
-    blob.extend_from_slice(nonce.as_bytes());
+    blob.extend_from_slice(&nonce_raw);
     blob.extend_from_slice(&ct);
     blob.extend_from_slice(&tag);
 

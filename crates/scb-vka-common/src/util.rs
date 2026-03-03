@@ -16,10 +16,22 @@ use subtle::ConstantTimeEq;
 /// content comparison needs to be constant-time to prevent oracle attacks.
 #[must_use]
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+    let mut res = a.len().ct_eq(&b.len());
+    let max_len = if a.len() > b.len() { a.len() } else { b.len() };
+
+    for i in 0..max_len {
+        // Bitwise logic to get element or 0 if out of bounds, preventing branch prediction length leaks
+        let a_valid = u8::from(i < a.len());
+        let b_valid = u8::from(i < b.len());
+
+        // Use conditional assignment without branching
+        let a_byte = [0, a.get(i).copied().unwrap_or(0)][a_valid as usize];
+        let b_byte = [0, b.get(i).copied().unwrap_or(0)][b_valid as usize];
+
+        res &= a_byte.ct_eq(&b_byte);
     }
-    a.ct_eq(b).into()
+
+    bool::from(res)
 }
 
 /// Parse a hex-encoded string into a 16-byte object ID.

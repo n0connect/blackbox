@@ -56,6 +56,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Initialize hardware security modules
+    Init,
+
     /// Create a new vault
     Create,
 
@@ -354,6 +357,19 @@ fn cmd_vacuum(manager: &DefaultVaultManager, path: &PathBuf, quiet: bool) -> Res
     Ok(())
 }
 
+fn cmd_init(manager: &DefaultVaultManager, quiet: bool) -> Result<()> {
+    if !quiet {
+        info!("Initializing hardware security keys...");
+    }
+    manager
+        .init_hardware()
+        .context("Failed to initialize hardware keys")?;
+    if !quiet {
+        info!("Hardware security keys successfully initialized.");
+    }
+    Ok(())
+}
+
 fn cmd_shell(manager: DefaultVaultManager, path: &PathBuf, quiet: bool) -> Result<()> {
     let password = prompt_password(false)?;
 
@@ -424,6 +440,7 @@ fn run() -> Result<()> {
 
     if let Some(cmd) = cli.cmd {
         match cmd {
+            Commands::Init => cmd_init(&manager, quiet),
             Commands::Create => cmd_create(&manager, &path, quiet),
             Commands::Add {
                 type_name,
@@ -445,6 +462,7 @@ fn run() -> Result<()> {
 }
 
 fn main() {
+    scb_vka_memory::harden_process();
     println!("{}", "BlackBox CLI".bright_white().bold());
 
     if let Err(e) = run() {

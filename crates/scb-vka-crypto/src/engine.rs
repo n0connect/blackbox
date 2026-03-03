@@ -53,14 +53,12 @@ impl AadPurpose {
             AadPurpose::Header => scb_vka_common::config::AAD_PURPOSE_HEADER.to_vec(),
             AadPurpose::ObjectData => scb_vka_common::config::AAD_PURPOSE_OBJECT_DATA.to_vec(),
             AadPurpose::UserPurpose(bytes) => {
-                let len = bytes.iter().position(|&c| c == 0).unwrap_or(32);
-                if len == 0 {
-                    // Canonical representation for empty purpose to prevent collision
-                    // Use a single null byte to distinguish from truly empty AAD
-                    vec![0u8]
-                } else {
-                    bytes[..len].to_vec()
-                }
+                // H-03 Fix: Do not truncate at null byte. Use full 32 bytes + domain separator
+                // to prevent any potential collisions.
+                let mut vec = Vec::with_capacity(33);
+                vec.push(0x03);
+                vec.extend_from_slice(bytes);
+                vec
             }
         }
     }
@@ -68,18 +66,20 @@ impl AadPurpose {
 
 /// Linear Nonce Type (Consumed on use)
 #[must_use]
-pub struct ConsumedNonce(Nonce);
+pub struct ConsumedNonce {
+    inner: Nonce,
+}
 
 impl ConsumedNonce {
     /// Wrap nonce for consumption
     pub fn new(nonce: Nonce) -> Self {
-        Self(nonce)
+        Self { inner: nonce }
     }
 
     /// Access the inner nonce bytes (read-only).
     #[must_use]
     pub fn as_bytes(&self) -> &[u8; 24] {
-        self.0.as_bytes()
+        self.inner.as_bytes()
     }
 }
 
@@ -240,6 +240,10 @@ impl KdfParams {
 // TRAIT DEFINITION
 // =============================================================================
 
+/// Streaming Input Trait combining Read and Seek
+pub trait ReadSeek: std::io::Read + std::io::Seek {}
+impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
+
 /// Core Crypto Engine Trait
 pub trait CryptoEngine {
     /// Orchestrated Root Derivation
@@ -370,7 +374,7 @@ pub trait CryptoEngine {
     fn decrypt_stream(
         &self,
         dek: &KeyKEK,
-        reader: &mut dyn std::io::Read,
+        reader: &mut dyn ReadSeek,
         writer: &mut dyn std::io::Write,
         aad: &AadContext,
         base_nonce: Nonce,
@@ -456,6 +460,8 @@ impl CryptoEngine for DefaultCryptoEngine {
             .expand(&leaf_info, &mut okm)
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
 
+        leaf_info.zeroize();
+
         let kek = KeyKEK::new(
             okm[0..32]
                 .try_into()
@@ -486,8 +492,7 @@ impl CryptoEngine for DefaultCryptoEngine {
         let cipher = XChaCha20Poly1305::new_from_slice(dek.as_bytes())
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
 
-        let nonce_inner = nonce.0;
-        let nonce_ga = aead::generic_array::GenericArray::from_slice(nonce_inner.as_bytes());
+        let nonce_ga = aead::generic_array::GenericArray::from_slice(nonce.as_bytes());
 
         let payload = Payload {
             msg: plaintext,
@@ -613,7 +618,9 @@ impl CryptoEngine for DefaultCryptoEngine {
         let mut key = [0u8; KEY_LEN];
         getrandom::getrandom(&mut key)
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
-        Ok(KeyKEK::new(key))
+        let dek = KeyKEK::new(key);
+        key.zeroize();
+        Ok(dek)
     }
 
     fn csprng(&self, len: usize) -> Result<Vec<u8>, VaultError> {
@@ -676,10 +683,10 @@ impl CryptoEngine for DefaultCryptoEngine {
             nonce_bytes[16..24].copy_from_slice(&ctr.to_le_bytes());
 
             let nonce = Nonce::new(nonce_bytes);
-            // We need a fresh ConsumedNonce for internal call, but we are managing the contract here manually
-            // to allow the loop. We verified linearity by consuming base_nonce at function entry.
-            // Safe because we increment nonce per chunk.
-            let consumed = ConsumedNonce(nonce);
+            // SAFETY: Each chunk gets a unique nonce (base + counter increment).
+            // We consumed base_nonce at function entry, guaranteeing the base is unique.
+            // Per-chunk nonces are derived deterministically from the base.
+            let consumed = ConsumedNonce::new(nonce);
 
             let (ct, tag) = self.encrypt_object(dek, plaintext_chunk, aad, consumed)?;
             writer
@@ -706,10 +713,11 @@ impl CryptoEngine for DefaultCryptoEngine {
         Ok(total_written)
     }
 
+    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
     fn decrypt_stream(
         &self,
         dek: &KeyKEK,
-        reader: &mut dyn std::io::Read,
+        reader: &mut dyn ReadSeek,
         writer: &mut dyn std::io::Write,
         aad: &AadContext,
         base_nonce: Nonce,
@@ -717,18 +725,22 @@ impl CryptoEngine for DefaultCryptoEngine {
     ) -> Result<u64, VaultError> {
         let chunk_size = scb_vka_common::config::STREAM_CHUNK_SIZE;
         let encrypted_chunk_size = chunk_size + TAG_LEN;
-        // Use SecureBuffer for mlock protection and auto-zeroize on drop
         let mut buffer = SecureBuffer::new(encrypted_chunk_size)
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
-        let mut total_written = 0u64;
-        let mut chunk_index = 0u64;
-        let base_nonce_bytes = base_nonce.as_bytes();
 
+        let start_pos = reader
+            .stream_position()
+            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+
+        // -------------------------------------------------------------
+        // PASS 1: Calculate and Verify MAC
+        // -------------------------------------------------------------
         let mut mac = <HmacSha3_256 as hmac::Mac>::new_from_slice(dek.as_bytes())
             .map_err(|_| VaultError::new(VaultErrorKind::OperationFailed))?;
+        let mut total_read_pt = 0u64;
 
         loop {
-            if total_written == expected_data_len {
+            if total_read_pt == expected_data_len {
                 let mut mac_bytes = [0u8; scb_vka_common::config::MAC_LEN];
                 reader
                     .read_exact(&mut mac_bytes)
@@ -738,6 +750,53 @@ impl CryptoEngine for DefaultCryptoEngine {
                 if !scb_vka_common::util::ct_eq(&computed_mac, &mac_bytes) {
                     return Err(VaultError::new(VaultErrorKind::IntegrityError));
                 }
+                break;
+            }
+
+            let remaining_pt = expected_data_len - total_read_pt;
+            let current_chunk_pt = usize::try_from(remaining_pt.min(chunk_size as u64))
+                .map_err(|_| VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
+            let expected_read = current_chunk_pt + TAG_LEN;
+
+            let mut read_count = 0;
+            while read_count < expected_read {
+                let n = reader
+                    .read(&mut buffer.as_mut_slice()[read_count..expected_read])
+                    .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+                if n == 0 {
+                    break;
+                }
+                read_count += n;
+            }
+
+            if read_count != expected_read {
+                return Err(VaultError::new(VaultErrorKind::IntegrityError));
+            }
+
+            let slice = buffer.as_mut_slice();
+            mac.update(&slice[..expected_read]); // MAC over CT and TAG
+            total_read_pt += current_chunk_pt as u64;
+        }
+
+        // -------------------------------------------------------------
+        // PASS 2: Decrypt and Write
+        // -------------------------------------------------------------
+        reader
+            .seek(std::io::SeekFrom::Start(start_pos))
+            .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
+
+        let mut total_written = 0u64;
+        let mut chunk_index = 0u64;
+        let base_nonce_bytes = base_nonce.as_bytes();
+
+        loop {
+            if total_written == expected_data_len {
+                // Pass over the MAC bytes since we already read and verified them in Pass 1
+                reader
+                    .seek(std::io::SeekFrom::Current(
+                        scb_vka_common::config::MAC_LEN as i64,
+                    ))
+                    .map_err(|_| VaultError::new(VaultErrorKind::IoError))?;
                 break;
             }
 
@@ -760,16 +819,6 @@ impl CryptoEngine for DefaultCryptoEngine {
             if read_count != expected_read {
                 return Err(VaultError::new(VaultErrorKind::IntegrityError));
             }
-
-            let mut ct_clone = vec![0u8; expected_read - TAG_LEN];
-            ct_clone.copy_from_slice(&buffer.as_mut_slice()[..expected_read - TAG_LEN]);
-
-            let mut tag_clone = vec![0u8; TAG_LEN];
-            tag_clone
-                .copy_from_slice(&buffer.as_mut_slice()[expected_read - TAG_LEN..expected_read]);
-
-            mac.update(&ct_clone);
-            mac.update(&tag_clone);
 
             // Calculate Nonce
             let mut nonce_bytes = *base_nonce_bytes;
@@ -801,6 +850,7 @@ impl CryptoEngine for DefaultCryptoEngine {
                 .checked_add(1)
                 .ok_or(VaultError::new(VaultErrorKind::ParameterOutOfRange))?;
         }
+
         Ok(total_written)
     }
 }

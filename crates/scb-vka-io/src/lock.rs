@@ -167,43 +167,8 @@ impl Drop for VaultLock {
 // =============================================================================
 
 #[cfg(not(any(unix, windows)))]
-impl VaultLock {
-    /// Acquire "lock" on vault file.
-    ///
-    /// # WARNING
-    /// This platform does NOT support exclusive file locking.
-    /// Concurrent access may corrupt the vault.
-    pub fn acquire(path: &Path) -> Result<Self, VaultError> {
-        #[cfg(debug_assertions)]
-        compile_error!(
-            "File locking is unavailable on this platform. \
-             Concurrent vault access will cause corruption. \
-             Supported: Unix (flock) or Windows (LockFileEx)."
-        );
-
-        tracing::warn!(
-            "File locking unavailable on this platform - concurrent access may corrupt vault"
-        );
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path)
-            .map_err(|_| VaultError::new(VaultErrorKind::StorageUnavailable))?;
-        Ok(Self { file })
-    }
-
-    pub fn file_mut(&mut self) -> &mut File {
-        &mut self.file
-    }
-
-    pub fn file(&self) -> &File {
-        &self.file
-    }
-}
-
-#[cfg(not(any(unix, windows)))]
-impl Drop for VaultLock {
-    fn drop(&mut self) {
-        // No-op: no lock to release on unsupported platforms
-    }
-}
+compile_error!(
+    "File locking is unavailable on this platform. \
+     Concurrent vault access will cause corruption. \
+     Supported: Unix (flock) or Windows (LockFileEx)."
+);

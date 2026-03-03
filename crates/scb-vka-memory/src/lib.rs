@@ -22,6 +22,51 @@ use zeroize::Zeroize;
 use scb_vka_common::error::{VaultError, VaultErrorKind};
 
 // =============================================================================
+// PROCESS HARDENING
+// =============================================================================
+
+/// Harden the entire process against memory dumping.
+/// Must be called early in the application lifecycle.
+pub fn harden_process() {
+    #[cfg(unix)]
+    {
+        // Disable core dumps on Unix
+        unsafe {
+            let mut limit = std::mem::zeroed::<libc::rlimit>();
+            limit.rlim_cur = 0;
+            limit.rlim_max = 0;
+            libc::setrlimit(libc::RLIMIT_CORE, &limit);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Threading::{
+            ProcessDynamicCodePolicy, ProcessSignaturePolicy, SetProcessMitigationPolicy,
+            PROCESS_MITIGATION_DYNAMIC_CODE_POLICY, PROCESS_MITIGATION_SIGNATURE_POLICY,
+        };
+
+        unsafe {
+            let mut dyn_code = std::mem::zeroed::<PROCESS_MITIGATION_DYNAMIC_CODE_POLICY>();
+            dyn_code.set_ProhibitDynamicCode(1);
+            let _ = SetProcessMitigationPolicy(
+                ProcessDynamicCodePolicy,
+                &dyn_code as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<PROCESS_MITIGATION_DYNAMIC_CODE_POLICY>() as usize,
+            );
+
+            let mut sig_pol = std::mem::zeroed::<PROCESS_MITIGATION_SIGNATURE_POLICY>();
+            sig_pol.set_MicrosoftSignedOnly(1);
+            let _ = SetProcessMitigationPolicy(
+                ProcessSignaturePolicy,
+                &sig_pol as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<PROCESS_MITIGATION_SIGNATURE_POLICY>() as usize,
+            );
+        }
+    }
+}
+
+// =============================================================================
 // MLOCK WRAPPERS
 // =============================================================================
 
@@ -64,21 +109,12 @@ fn mem_unlock(ptr: *const u8, len: usize) {
     }
 }
 
-// Fallback for unsupported platforms (e.g., WASM)
-// WARNING: Memory locking is unavailable — sensitive data may be swapped to disk.
 #[cfg(not(any(unix, windows)))]
-fn mem_lock(_ptr: *const u8, _len: usize) -> Result<(), VaultError> {
-    #[cfg(debug_assertions)]
-    compile_error!(
-        "Memory locking is unavailable on this platform. \
-         Sensitive key material may be written to swap. \
-         Supported: Unix (mlock) or Windows (VirtualLock)."
-    );
-    Ok(())
-}
-
-#[cfg(not(any(unix, windows)))]
-fn mem_unlock(_ptr: *const u8, _len: usize) {}
+compile_error!(
+    "Memory locking is unavailable on this platform. \
+     Sensitive key material may be written to swap. \
+     Supported: Unix (mlock) or Windows (VirtualLock)."
+);
 
 // =============================================================================
 // SECURE BOX
@@ -96,7 +132,7 @@ impl<T: Zeroize> SecureBox<T> {
     /// There is an inherent, brief window between `Box::new` (heap write)
     /// and `mem_lock` where the data could theoretically be swapped to disk.
     /// This is a fundamental limitation of safe Rust — `Box::new_uninit()`
-    /// + `ptr::write` could narrow this window further but requires nightly
+    /// and `ptr::write` could narrow this window further but requires nightly
     /// features.  In practice the window is negligible (<µs).
     #[inline(always)] // Minimise the mlock gap
     pub fn new(value: T) -> Result<Self, VaultError> {
@@ -118,9 +154,11 @@ impl<T: Zeroize> Deref for SecureBox<T> {
 impl<T: Zeroize> Drop for SecureBox<T> {
     #[inline(never)] // Prevent compiler from optimizing away zeroize
     fn drop(&mut self) {
-        self.inner.zeroize();
+        // SECURITY: Save pointer and length BEFORE zeroize.
+        // Zeroize may invalidate internal state for complex types.
         let ptr = &*self.inner as *const T as *const u8;
         let len = std::mem::size_of::<T>();
+        self.inner.zeroize();
         mem_unlock(ptr, len);
     }
 }
@@ -166,8 +204,13 @@ impl Deref for SecureBuffer {
 
 impl Drop for SecureBuffer {
     fn drop(&mut self) {
+        // SECURITY: Save pointer and length BEFORE zeroize.
+        // Vec::zeroize() calls clear() which sets len to 0,
+        // making subsequent munlock(ptr, 0) a no-op.
+        let ptr = self.inner.as_ptr();
+        let len = self.inner.len();
         self.inner.zeroize();
-        mem_unlock(self.inner.as_ptr(), self.inner.len());
+        mem_unlock(ptr, len);
     }
 }
 // ===================================

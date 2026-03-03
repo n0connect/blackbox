@@ -29,7 +29,7 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 ```
                         ┌─────────────────────────────────────┐
   Password ────────────▶│            Argon2id                 │
-  Salt (from vault) ───▶│  (1 GiB memory, 3 iterations)       │
+  Salt (from vault) ───▶│  (64 MB memory, 3 iterations)       │
                         └─────────────────┬───────────────────┘
                                           │
                                           ▼
@@ -194,7 +194,7 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 │          ┌─────────────────────┐                                        │
 │          │      Argon2id       │                                        │
 │          │  ┌───────────────┐  │
-│          │  │ Memory: 1 GiB │  │
+│          │  │ Memory: 64 MB │  │
 │          │  │ Iterations: 3 │  │
 │          │  │ Parallelism: 4│  │                                        │
 │          │  └───────────────┘  │                                        │
@@ -599,7 +599,7 @@ Shell commands: `ls`, `cat <id>`, `rm <id>`, `help`, `exit`
 cargo build --release
 ```
 
-> **Note:** KDF always uses minimum 1 GiB memory for brute-force resistance. No bypass feature available.
+> **Note:** KDF always uses minimum 64 MiB memory for brute-force resistance. No bypass feature available.
 
 ---
 
