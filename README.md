@@ -632,52 +632,33 @@ See LICENSE file.
 
 ## References
 
-### Cryptographic Algorithms
-
-| Algorithm | Usage | Specification |
-|-----------|-------|---------------|
-| XChaCha20-Poly1305 | AEAD encryption (objects, headers, DEK wrapping) | D. J. Bernstein, "ChaCha20 and Poly1305 for IETF Protocols," RFC 8439; Extended nonce construction per draft-irtf-cfrg-xchacha |
-| Argon2id | Password-based key derivation (User Root) | RFC 9106 — "Argon2 Memory-Hard Function for Password Hashing and Proof-of-Work Applications" |
-| HKDF | Key expansion (Recovery Root, Leaf Keys) | RFC 5869 — "HMAC-based Extract-and-Expand Key Derivation Function" |
-| HMAC-SHA3-512 | Key fusion (Master Root, Context Root) | FIPS 198-1 — "The Keyed-Hash Message Authentication Code" with SHA-3 (FIPS 202) |
-| HMAC-SHA3-256 | Header MAC, Stream Integrity MAC | FIPS 198-1 with SHA-3 (FIPS 202) |
-| SHA-3 (Keccak) | Hash family underlying HMAC and HKDF operations | FIPS 202 — "SHA-3 Standard: Permutation-Based Hash and Extendable-Output Functions" |
-| Hash-to-Curve | Convert UR to P-256 point (macOS Secure Enclave ECDH) | RFC 9380 — "Hashing to Elliptic Curves" (SSWU method for P-256) |
-| ECDH | Key agreement inside Secure Enclave (macOS) | SEC 1 v2.0 — "Elliptic Curve Cryptography"; NIST SP 800-56A Rev. 3 |
-
-### Security Standards
-
-| Standard | Relevance |
-|----------|-----------|
-| NIST SP 800-132 | Password-Based Key Derivation — guides Argon2id parameter selection |
-| NIST SP 800-38D | Recommendation for GCM Mode — informs AEAD tag handling patterns |
-| NIST SP 800-56C Rev. 2 | Key Derivation Methods — informs HKDF usage for key expansion |
-| NIST SP 800-108 Rev. 1 | KDF in Counter Mode — informs label/context separation design |
-| NIST SP 800-131A Rev. 2 | Transitioning Cryptographic Algorithms — confirms algorithm strength adequacy |
-
-### Memory and Process Security
-
-| Technique | Reference |
-|-----------|-----------|
-| mlock / VirtualLock | POSIX.1-2017 (IEEE Std 1003.1); Win32 API Memory Management |
-| Zeroization | NIST SP 800-88 Rev. 1 — "Guidelines for Media Sanitization"; secure_clear (C23) semantics |
-| Core Dump Prevention | POSIX setrlimit(RLIMIT_CORE); Linux prctl(PR_SET_DUMPABLE); Windows SetErrorMode |
-| Constant-Time Comparison | Timing attack mitigation per Brumley & Boneh (2003); implemented via subtle crate |
-
-### Rust Cryptographic Libraries
-
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| chacha20poly1305 | 0.10 | XChaCha20-Poly1305 AEAD |
-| argon2 | 0.5 | Argon2id password hashing |
-| hkdf | 0.12 | HMAC-based Key Derivation |
-| hmac | 0.12 | HMAC construction |
-| sha3 | 0.10 | SHA-3 hash family (Keccak) |
-| subtle | 2.5 | Constant-time operations |
-| zeroize | 1.8 | Secure memory zeroing |
-| aead | 0.5 | AEAD trait abstraction |
-| getrandom | 0.2 | OS-level CSPRNG |
-| tss-esapi | 7.5 | TPM 2.0 integration (Linux/Windows) |
-| security-framework | 2.11 | macOS Security.framework bindings (Secure Enclave ECDH) |
-| p256 | 0.13 | P-256 elliptic curve (hash-to-curve, ECDH) |
-| elliptic-curve | 0.13 | Elliptic curve traits (hash2curve feature) |
+- **XChaCha20-Poly1305 (Cryptographic Algorithm)**: AEAD encryption (objects, headers, DEK wrapping) — D. J. Bernstein, "ChaCha20 and Poly1305 for IETF Protocols," RFC 8439; Extended nonce construction per draft-irtf-cfrg-xchacha
+- **Argon2id (Cryptographic Algorithm)**: Password-based key derivation (User Root) — RFC 9106 "Argon2 Memory-Hard Function for Password Hashing and Proof-of-Work Applications"
+- **HKDF (Cryptographic Algorithm)**: Key expansion (Recovery Root, Leaf Keys) — RFC 5869 "HMAC-based Extract-and-Expand Key Derivation Function"
+- **HMAC-SHA3-512 (Cryptographic Algorithm)**: Key fusion (Master Root, Context Root) — FIPS 198-1 "The Keyed-Hash Message Authentication Code" with SHA-3 (FIPS 202)
+- **HMAC-SHA3-256 (Cryptographic Algorithm)**: Header MAC, Stream Integrity MAC — FIPS 198-1 with SHA-3 (FIPS 202)
+- **SHA-3 (Keccak) (Cryptographic Algorithm)**: Hash family underlying HMAC and HKDF operations — FIPS 202 "SHA-3 Standard: Permutation-Based Hash and Extendable-Output Functions"
+- **Hash-to-Curve (Cryptographic Algorithm)**: Convert UR to P-256 point (macOS Secure Enclave ECDH) — RFC 9380 "Hashing to Elliptic Curves" (SSWU method for P-256)
+- **ECDH (Cryptographic Algorithm)**: Key agreement inside Secure Enclave (macOS) — SEC 1 v2.0 "Elliptic Curve Cryptography"; NIST SP 800-56A Rev. 3
+- **NIST SP 800-132 (Security Standard)**: Password-Based Key Derivation — guides Argon2id parameter selection
+- **NIST SP 800-38D (Security Standard)**: Recommendation for GCM Mode — informs AEAD tag handling patterns
+- **NIST SP 800-56C Rev. 2 (Security Standard)**: Key Derivation Methods — informs HKDF usage for key expansion
+- **NIST SP 800-108 Rev. 1 (Security Standard)**: KDF in Counter Mode — informs label/context separation design
+- **NIST SP 800-131A Rev. 2 (Security Standard)**: Transitioning Cryptographic Algorithms — confirms algorithm strength adequacy
+- **mlock / VirtualLock (Memory and Process Security)**: POSIX.1-2017 (IEEE Std 1003.1); Win32 API Memory Management
+- **Zeroization (Memory and Process Security)**: NIST SP 800-88 Rev. 1 "Guidelines for Media Sanitization"; secure_clear (C23) semantics
+- **Core Dump Prevention (Memory and Process Security)**: POSIX setrlimit(RLIMIT_CORE); Linux prctl(PR_SET_DUMPABLE); Windows SetErrorMode
+- **Constant-Time Comparison (Memory and Process Security)**: Timing attack mitigation per Brumley & Boneh (2003); implemented via subtle crate
+- **chacha20poly1305 v0.10.x (Rust Crate)**: XChaCha20-Poly1305 AEAD
+- **argon2 v0.5.x (Rust Crate)**: Argon2id password hashing
+- **hkdf v0.12.x (Rust Crate)**: HMAC-based Key Derivation
+- **hmac v0.12.x (Rust Crate)**: HMAC construction
+- **sha3 v0.10.x (Rust Crate)**: SHA-3 hash family (Keccak)
+- **subtle v2.5.x (Rust Crate)**: Constant-time operations
+- **zeroize v1.8.x (Rust Crate)**: Secure memory zeroing
+- **aead v0.5.x (Rust Crate)**: AEAD trait abstraction
+- **getrandom v0.2.x (Rust Crate)**: OS-level CSPRNG
+- **tss-esapi v7.5.x (Rust Crate)**: TPM 2.0 integration (Linux/Windows)
+- **security-framework v2.11.x (Rust Crate)**: macOS Security.framework bindings (Secure Enclave ECDH)
+- **p256 v0.13.x (Rust Crate)**: P-256 elliptic curve (hash-to-curve, ECDH)
+- **elliptic-curve v0.13.x (Rust Crate)**: Elliptic curve traits (hash2curve feature)
