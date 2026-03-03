@@ -34,9 +34,9 @@
 //! ```
 
 pub mod layout;
-pub mod manager;
 pub mod lock;
+pub mod manager;
 
 pub use layout::*;
-pub use manager::*;
 pub use lock::*;
+pub use manager::*;

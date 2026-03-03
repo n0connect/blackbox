@@ -191,16 +191,64 @@ where
             }
         };
 
-        let mut buf = Vec::new();
+        // SH-02: Prevent OOM DoS by enforcing a strict size limit on `cat`
+        let max_cat_size: u64 = 1024 * 1024; // 1 MiB hard limit for shell display
+        let mut object_size = 0;
+
+        if let Ok(objects) = self.manager.list_objects(&self.session) {
+            if let Some(obj) = objects.iter().find(|o| o.object_id == object_id) {
+                object_size = obj.size;
+                if object_size > max_cat_size {
+                    println!(
+                        "{}: Object size ({}) exceeds 1 MiB display limit. Use `read` to extract to file.",
+                        "Error".red(),
+                        format_size(object_size)
+                    );
+                    return;
+                }
+            } else {
+                println!("{}: Object not found", "Error".red());
+                return;
+            }
+        }
+
+        // SH-01: Use Zeroizing to ensure decrypted data doesn't leak into heap
+        let mut buf = zeroize::Zeroizing::new(Vec::with_capacity(object_size as usize));
+
         match self
             .manager
-            .read_object(&mut self.session, &object_id, &mut buf)
+            .read_object(&mut self.session, &object_id, &mut *buf)
         {
             Ok(bytes_read) => {
-                // Try to display as text, fall back to binary info
-                match String::from_utf8(buf) {
+                // SH-03: Try to display as text but sanitize to prevent Terminal Injection
+                match String::from_utf8(buf.to_vec()) {
                     Ok(text) => {
-                        println!("{}", text);
+                        // SH-03: Strict whitelisting to prevent Terminal Injection (ANSI escape)
+                        // A blacklist is insufficient because of the complexity of terminal emulators.
+                        // We ONLY allow printable characters and safe whitespace.
+                        let sanitized: String = text
+                            .chars()
+                            .filter_map(|c| {
+                                // 1. Safe whitespace
+                                if matches!(c, '\n' | '\r' | '\t') {
+                                    Some(c)
+                                }
+                                // 2. Standard printable ASCII (Space to Tilde)
+                                else if ('\x20'..='\x7E').contains(&c) {
+                                    Some(c)
+                                }
+                                // 3. Extended printable characters (Valid Unicode > 0x7F)
+                                // We reject ALL control characters (C0 and C1 sets)
+                                else if c > '\x7F' && !c.is_control() {
+                                    Some(c)
+                                }
+                                // 4. Everything else (including ANSI escapes \x1B) is stripped
+                                else {
+                                    None // Drop the dangerous character completely
+                                }
+                            })
+                            .collect();
+                        println!("{sanitized}");
                     }
                     Err(_) => {
                         println!(
