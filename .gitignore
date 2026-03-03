@@ -10,6 +10,11 @@
 *.swp
 *~
 
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
 # IDE / Editor
 .idea/
 .vscode/
@@ -31,7 +36,16 @@
 /sandbox/vaults/
 /sandbox/logs/
 /sandbox/*.scb
+/sandbox/*.bbx
+/sandbox/*.box
+/sandbox/*.vault
 /sandbox/*.log
+
+# Global Vault Files (prevent accidental commit of sensitive vaults)
+*.bbx
+*.box
+*.vault
+.vacuum-*.tmp
 
 # Agent/implementation reminder (not versioned)
 IMPLEMENTATION_REMINDER.md
