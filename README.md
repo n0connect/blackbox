@@ -89,20 +89,6 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 
 ---
 
-## Security Warnings
-
-**Read before use. These limitations are inherent to the design.**
-
-1. **No Password Change**: Password cannot be changed. Create a new vault to change.
-
-2. **Single Session Only**: Concurrent access will corrupt the vault.
-
-3. **COW Filesystem Limitation**: On ZFS/APFS, secure deletion cannot guarantee erasure of decrypted files.
-
-4. **Memory Constraints**: SecureBox uses mlock. Systems with limited memory may fail.
-
----
-
 ## Key Features
 
 ```
@@ -599,7 +585,7 @@ Shell commands: `ls`, `cat <id>`, `rm <id>`, `help`, `exit`
 cargo build --release
 ```
 
-> **Note:** KDF always uses minimum 64 MiB memory for brute-force resistance. No bypass feature available.
+> **Note:** KDF always uses minimum 64 MiB memory for brute-force resistance.
 
 ---
 
