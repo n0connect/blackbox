@@ -396,13 +396,17 @@ impl VaultManager for DefaultVaultManager {
             &kdf_params,
         )?;
 
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .map_err(|_| io_err())?;
+        #[allow(unused_mut)]
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(true);
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(0x80000000); // FILE_FLAG_WRITE_THROUGH
+        }
+
+        let mut file = options.open(path).map_err(|_| io_err())?;
 
         let mut do_create = || -> Result<(), VaultError> {
             let total_blocks = MIN_TOTAL_BLOCKS;
@@ -812,6 +816,12 @@ impl VaultManager for DefaultVaultManager {
         {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
+        }
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.custom_flags(0x80000000); // FILE_FLAG_WRITE_THROUGH
         }
 
         let mut temp_file = options.open(temp_path).map_err(|_| io_err())?;

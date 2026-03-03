@@ -102,9 +102,12 @@ impl VaultLock {
         };
         use windows_sys::Win32::System::IO::OVERLAPPED;
 
+        use std::os::windows::fs::OpenOptionsExt;
+
         let file = OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(0x80000000) // FILE_FLAG_WRITE_THROUGH
             .open(path)
             .map_err(|_| VaultError::new(VaultErrorKind::StorageUnavailable))?;
 
