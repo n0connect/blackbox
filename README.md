@@ -11,7 +11,7 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 
 ---
 
-> **⚠️ CRITICAL WARNINGS**
+> **⚠️ WARNINGS**
 >
 > | Risk | Description |
 > |------|-------------|
