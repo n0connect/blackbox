@@ -42,7 +42,8 @@ clean:
 	$(CARGO_CMD) clean
 	rm -rf fuzz/artifacts/
 	rm -rf fuzz/corpus/
-	rm -f *.profraw *.profdata 
+	find . -type f -name "*.profraw" -delete
+	find . -type f -name "*.profdata" -delete
 	rm -rf coverage/
 	@echo "==> Project cleaned!"
 
