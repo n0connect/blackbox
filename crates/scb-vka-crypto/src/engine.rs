@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn test_encryption_decryption_roundtrip() {
-        let engine = DefaultCryptoEngine::default();
+        let engine = DefaultCryptoEngine;
 
         let dek_vec = engine.csprng(KEY_LEN).expect("CSPRNG failed");
         let mut dek_arr = [0u8; KEY_LEN];
@@ -908,7 +908,7 @@ mod tests {
 
     #[test]
     fn test_mac_verification_failure() {
-        let engine = DefaultCryptoEngine::default();
+        let engine = DefaultCryptoEngine;
         let dek_arr = [0x55; KEY_LEN];
         let dek = KeyKEK::new(dek_arr);
 

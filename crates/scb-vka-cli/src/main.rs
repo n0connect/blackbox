@@ -162,7 +162,7 @@ fn prompt_password(confirm: bool) -> Result<Zeroizing<String>> {
     use std::io::{IsTerminal, Write};
     let read_pwd = |prompt: &str| -> Result<String> {
         if std::io::stdin().is_terminal() {
-            eprint!("{} ", prompt);
+            eprint!("{prompt} ");
             std::io::stderr().flush().unwrap();
             rpassword::read_password().context("Failed to read password")
         } else {
@@ -170,9 +170,7 @@ fn prompt_password(confirm: bool) -> Result<Zeroizing<String>> {
             std::io::stdin()
                 .read_line(&mut buffer)
                 .context("Failed to read piped password")?;
-            Ok(buffer
-                .trim_end_matches(|c| c == '\r' || c == '\n')
-                .to_string())
+            Ok(buffer.trim_end_matches(['\r', '\n']).to_string())
         }
     };
 
@@ -199,7 +197,7 @@ fn prompt_password(confirm: bool) -> Result<Zeroizing<String>> {
 /// Unlock vault with standardized logging
 fn unlock_vault(
     manager: &DefaultVaultManager,
-    path: &PathBuf,
+    path: &std::path::Path,
     password: &Zeroizing<String>,
     quiet: bool,
 ) -> Result<VaultSession> {
@@ -224,7 +222,7 @@ fn lock_vault(manager: &DefaultVaultManager, session: VaultSession) -> Result<()
 // COMMAND HANDLERS
 // =============================================================================
 
-fn cmd_create(manager: &DefaultVaultManager, path: &PathBuf, quiet: bool) -> Result<()> {
+fn cmd_create(manager: &DefaultVaultManager, path: &std::path::Path, quiet: bool) -> Result<()> {
     let password = prompt_password(true)?;
 
     if let Some(p) = path.parent() {
@@ -291,7 +289,7 @@ fn cmd_add(
     info!("Object added: {}", id_hex);
 
     if quiet {
-        println!("{}", id_hex);
+        println!("{id_hex}");
     }
 
     Ok(())

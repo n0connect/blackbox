@@ -309,16 +309,10 @@ impl DefaultVaultManager {
     fn unlock_vault_inner(&self, path: &Path, password: &[u8]) -> Result<VaultSession, VaultError> {
         debug!(path = %path.display(), "Attempting to unlock vault");
 
-        // Acquire exclusive lock first - prevents concurrent access
-        let mut lock = VaultLock::acquire(path)?;
-
+        // Read superblock statelessly since it never mutates after creation
+        let mut file = std::fs::File::open(path).map_err(|_| io_err())?;
         let mut sb_bytes = [0u8; SUPERBLOCK_SIZE];
-        lock.file_mut()
-            .seek(SeekFrom::Start(0))
-            .map_err(|_| io_err())?;
-        lock.file_mut()
-            .read_exact(&mut sb_bytes)
-            .map_err(|_| io_err())?;
+        file.read_exact(&mut sb_bytes).map_err(|_| io_err())?;
 
         let superblock = Superblock::parse(&sb_bytes[..])?;
 
@@ -340,6 +334,9 @@ impl DefaultVaultManager {
             superblock.created_timestamp(),
             &kdf_params,
         )?;
+
+        // Acquire exclusive lock only for the mutable data synchronization/header reading phase
+        let mut lock = VaultLock::acquire(path)?;
 
         let (header, file_table, space_manager, active_slot_offset) =
             read_encrypted_header(lock.file_mut(), &kek, &mk, &self.crypto, &superblock)?;
@@ -541,8 +538,8 @@ impl VaultManager for DefaultVaultManager {
         if data_len == 0 {
             return Err(VaultError::new(VaultErrorKind::ParameterOutOfRange));
         }
-        let max_data_len = scb_vka_common::config::MAX_TOTAL_BLOCKS as u64
-            * scb_vka_common::config::BLOCK_SIZE as u64;
+        let max_data_len =
+            scb_vka_common::config::MAX_TOTAL_BLOCKS * scb_vka_common::config::BLOCK_SIZE as u64;
         if data_len > max_data_len {
             return Err(VaultError::new(VaultErrorKind::ParameterOutOfRange));
         }
@@ -585,7 +582,7 @@ impl VaultManager for DefaultVaultManager {
 
                 let new_len = session.space_manager.total_blocks() * (BLOCK_SIZE as u64);
                 session.lock.file_mut().set_len(new_len).map_err(|e| {
-                    eprintln!("SET_LEN ERROR: {}", e);
+                    eprintln!("SET_LEN ERROR: {e}");
                     io_err()
                 })?;
 
@@ -600,7 +597,7 @@ impl VaultManager for DefaultVaultManager {
             .file_mut()
             .seek(SeekFrom::Start(offset))
             .map_err(|e| {
-                eprintln!("SEEK ERROR: {}", e);
+                eprintln!("SEEK ERROR: {e}");
                 io_err()
             })?;
 
@@ -609,7 +606,7 @@ impl VaultManager for DefaultVaultManager {
             .file_mut()
             .write_all(&wrapped_dek)
             .map_err(|e| {
-                eprintln!("WRITE WRAPPED_DEK ERROR: {}", e);
+                eprintln!("WRITE WRAPPED_DEK ERROR: {e}");
                 io_err()
             })?;
 
@@ -619,7 +616,7 @@ impl VaultManager for DefaultVaultManager {
             .file_mut()
             .write_all(nonce.as_bytes())
             .map_err(|e| {
-                eprintln!("WRITE NONCE ERROR: {}", e);
+                eprintln!("WRITE NONCE ERROR: {e}");
                 io_err()
             })?;
 
@@ -635,7 +632,7 @@ impl VaultManager for DefaultVaultManager {
                 consumed,
             )
             .map_err(|e| {
-                eprintln!("ENCRYPT_STREAM ERROR: {:?}", e);
+                eprintln!("ENCRYPT_STREAM ERROR: {e:?}");
                 e
             })?;
 
@@ -646,10 +643,7 @@ impl VaultManager for DefaultVaultManager {
                 .inspect_err(|_| {
                     error!("CRITICAL: Space leak during rollback - bitmap inconsistent");
                 })?;
-            eprintln!(
-                "BYTES_WRITTEN {} != expected {}",
-                bytes_written, encrypted_payload_size
-            );
+            eprintln!("BYTES_WRITTEN {bytes_written} != expected {encrypted_payload_size}");
             return Err(io_err());
         }
 
@@ -841,7 +835,7 @@ impl VaultManager for DefaultVaultManager {
         // O4: Use CSPRNG random suffix for temp file to prevent collisions
         let random_suffix = hex::encode(self.crypto.csprng(8)?);
         let mut temp_path_str = path.to_string_lossy().to_string();
-        temp_path_str.push_str(&format!(".vacuum-{}.tmp", random_suffix));
+        temp_path_str.push_str(&format!(".vacuum-{random_suffix}.tmp"));
         let temp_path = Path::new(&temp_path_str);
 
         #[allow(unused_mut)]

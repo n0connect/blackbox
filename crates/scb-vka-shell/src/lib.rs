@@ -230,10 +230,7 @@ where
                         println!("{sanitized}");
                     }
                     Err(_) => {
-                        println!(
-                            "{}",
-                            format!("[Binary data: {} bytes]", bytes_read).yellow()
-                        );
+                        println!("{}", format!("[Binary data: {bytes_read} bytes]").yellow());
                     }
                 }
             }
@@ -336,7 +333,7 @@ where
     }
 
     fn cmd_info(&self) {
-        let vid = hex::encode(&self.session.vid);
+        let vid = hex::encode(self.session.vid);
         let vid_short = hex::encode(&self.session.vid[..8]);
 
         println!("{}", "Vault Information".bold());
@@ -352,7 +349,7 @@ where
                 println!("  {:<12} {}", "Total size:".cyan(), format_size(total_size));
             }
             Err(_) => {
-                println!("  {:<12} {}", "Objects:".cyan(), "?");
+                println!("  {:<12} ?", "Objects:".cyan());
             }
         }
     }
@@ -360,27 +357,18 @@ where
     fn cmd_help(&self) {
         println!("{}", "Available Commands".bold());
         println!("{}", "-".repeat(50));
-        println!("  {:<20} {}", "ls, list".cyan(), "List all objects");
-        println!("  {:<20} {}", "cat <id>".cyan(), "Display object content");
-        println!("  {:<20} {}", "rm <id>".cyan(), "Delete object");
+        println!("  {:<20} List all objects", "ls, list".cyan());
+        println!("  {:<20} Display object content", "cat <id>".cyan());
+        println!("  {:<20} Delete object", "rm <id>".cyan());
         println!(
-            "  {:<20} {}",
-            "add <type> <purp> <data>".cyan(),
-            "Add inline data"
+            "  {:<20} Add inline data",
+            "add <type> <purp> <data>".cyan()
         );
-        println!(
-            "  {:<20} {}",
-            "add -f <file> <t> <p>".cyan(),
-            "Add from file"
-        );
-        println!("  {:<20} {}", "info".cyan(), "Show vault information");
-        println!(
-            "  {:<20} {}",
-            "vacuum".cyan(),
-            "Compact vault (closes session)"
-        );
-        println!("  {:<20} {}", "clear".cyan(), "Clear screen");
-        println!("  {:<20} {}", "exit, quit, q".cyan(), "Lock and exit");
+        println!("  {:<20} Add from file", "add -f <file> <t> <p>".cyan());
+        println!("  {:<20} Show vault information", "info".cyan());
+        println!("  {:<20} Compact vault (closes session)", "vacuum".cyan());
+        println!("  {:<20} Clear screen", "clear".cyan());
+        println!("  {:<20} Lock and exit", "exit, quit, q".cyan());
         println!();
         println!(
             "{}",
@@ -435,7 +423,7 @@ fn format_size(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.1}K", bytes as f64 / KB as f64)
     } else {
-        format!("{}B", bytes)
+        format!("{bytes}B")
     }
 }
 // =============================================================================
@@ -445,23 +433,10 @@ fn format_size(bytes: u64) -> String {
 /// Sanitizes text for terminal output by stripping unsafe control characters and ANSI escapes.
 pub fn sanitize_terminal_output(text: &str) -> String {
     text.chars()
-        .filter_map(|c| {
-            // 1. Safe whitespace
-            if matches!(c, '\n' | '\r' | '\t') {
-                Some(c)
-            }
-            // 2. Standard printable ASCII (Space to Tilde)
-            else if ('\x20'..='\x7E').contains(&c) {
-                Some(c)
-            }
-            // 3. Extended printable characters (Valid Unicode > 0x7F) reject control characters
-            else if c > '\x7F' && !c.is_control() {
-                Some(c)
-            }
-            // 4. Strip ANSI escapes and other unprintables
-            else {
-                None
-            }
+        .filter(|&c| {
+            matches!(c, '\n' | '\r' | '\t')
+                || ('\x20'..='\x7E').contains(&c)
+                || (c > '\x7F' && !c.is_control())
         })
         .collect()
 }

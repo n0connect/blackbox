@@ -51,12 +51,22 @@ impl VaultLock {
             .map_err(|_| VaultError::new(VaultErrorKind::StorageUnavailable))?;
 
         let fd = file.as_raw_fd();
-        // LOCK_EX: Exclusive lock
-        // LOCK_NB: Non-blocking (return error instead of waiting)
-        let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+        let mut delay = 10;
 
-        if result != 0 {
-            return Err(VaultError::new(VaultErrorKind::VaultBusy));
+        loop {
+            // LOCK_EX: Exclusive lock
+            // LOCK_NB: Non-blocking (return error instead of waiting forever if stuck)
+            let result = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if result == 0 {
+                break;
+            }
+            if start.elapsed() > timeout {
+                return Err(VaultError::new(VaultErrorKind::VaultBusy));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            delay = std::cmp::min(delay * 2, 200);
         }
 
         Ok(Self { file })
@@ -113,22 +123,31 @@ impl VaultLock {
 
         let handle = file.as_raw_handle() as HANDLE;
 
-        // OVERLAPPED structure for LockFileEx (required even for synchronous ops)
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        let start = std::time::Instant::now();
+        let timeout = std::time::Duration::from_secs(5);
+        let mut delay = 10;
 
-        let result = unsafe {
-            LockFileEx(
-                handle,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,        // reserved
-                u32::MAX, // lock entire file (low)
-                u32::MAX, // lock entire file (high)
-                &mut overlapped,
-            )
-        };
-
-        if result == 0 {
-            return Err(VaultError::new(VaultErrorKind::VaultBusy));
+        loop {
+            // OVERLAPPED structure for LockFileEx (required even for synchronous ops)
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            let result = unsafe {
+                LockFileEx(
+                    handle,
+                    LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                    0,        // reserved
+                    u32::MAX, // lock entire file (low)
+                    u32::MAX, // lock entire file (high)
+                    &mut overlapped,
+                )
+            };
+            if result != 0 {
+                break;
+            }
+            if start.elapsed() > timeout {
+                return Err(VaultError::new(VaultErrorKind::VaultBusy));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            delay = std::cmp::min(delay * 2, 200);
         }
 
         Ok(Self { file })

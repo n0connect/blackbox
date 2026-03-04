@@ -272,6 +272,7 @@ pub const AAD_PURPOSE_OBJECT_DATA: &[u8] = b"object_data";
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::assertions_on_constants)]
     use super::*;
 
     #[test]

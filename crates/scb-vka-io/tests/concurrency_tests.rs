@@ -40,7 +40,7 @@ fn test_concurrent_lock_acquisition() {
                     if e.kind == VaultErrorKind::VaultBusy {
                         busy_clone.fetch_add(1, Ordering::SeqCst);
                     } else {
-                        panic!("Unexpected lock acquisition error: {:?}", e);
+                        panic!("Unexpected lock acquisition error: {e:?}");
                     }
                 }
             }
@@ -57,8 +57,7 @@ fn test_concurrent_lock_acquisition() {
     let final_busy = busy_count.load(Ordering::SeqCst);
 
     println!(
-        "Threads completed. Acquired: {}, Busy: {}",
-        final_success, final_busy
+        "Threads completed. Acquired: {final_success}, Busy: {final_busy}"
     );
 
     // Assertions
