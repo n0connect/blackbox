@@ -1,5 +1,5 @@
 # Build
-/target/
+target/
 **/*.rs.bk
 # Cargo.lock is tracked for reproducible builds
 
