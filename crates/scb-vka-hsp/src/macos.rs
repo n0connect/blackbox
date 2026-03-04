@@ -223,18 +223,20 @@ impl MacOSEnclave {
             if sec_key_ref.is_null() {
                 let error_desc = if !error.is_null() {
                     // Redact detailed error info in release builds
-                    let desc = if cfg!(debug_assertions) {
-                        use core_foundation::error::CFError;
-                        let err_wrapper = CFError::wrap_under_get_rule(error);
-                        format!(
-                            "Error {}: {}",
-                            err_wrapper.code(),
-                            err_wrapper.description()
-                        )
-                    } else {
-                        "[redacted]".to_string()
-                    };
+                    let err_wrapper = core_foundation::error::CFError::wrap_under_get_rule(error);
+                    let code = err_wrapper.code();
+                    let desc = format!("Error {}: {}", code, err_wrapper.description());
                     core_foundation::base::CFRelease(error as core_foundation::base::CFTypeRef);
+
+                    // No fallback! We strictly enforce Secure Enclave (SE) in release builds.
+                    // If we get errSecMissingEntitlement (-34018), we must instruct the user to codesign.
+                    if code == -34018 {
+                        tracing::error!(
+                            "Secure Enclave access denied. You MUST codesign the binary with entitlements to use BlackBox in release mode. \
+                            Run `codesign -s - --entitlements entitlements.plist --force target/release/blackbox`"
+                        );
+                    }
+
                     desc
                 } else {
                     "Unknown error".to_string()

@@ -11,6 +11,8 @@ all: build
 build:
 	@echo "==> Building BlackBox Project (Release)..."
 	$(CARGO_CMD) build --release
+	@echo "==> Signing BlackBox Binary with Secure Enclave Entitlements..."
+	codesign -s - --entitlements entitlements.plist --force target/release/blackbox
 
 # 2. Run the CLI
 run:

@@ -223,6 +223,11 @@ fn lock_vault(manager: &DefaultVaultManager, session: VaultSession) -> Result<()
 // =============================================================================
 
 fn cmd_create(manager: &DefaultVaultManager, path: &std::path::Path, quiet: bool) -> Result<()> {
+    // Force hardware initialization check before prompting password
+    manager
+        .init_hardware()
+        .context("Hardware initialization failed. Vault creation aborted.")?;
+
     let password = prompt_password(true)?;
 
     if let Some(p) = path.parent() {
