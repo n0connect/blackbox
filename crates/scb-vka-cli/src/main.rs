@@ -25,6 +25,34 @@ use zeroize::Zeroizing;
 
 use scb_vka_orchestrator::{DefaultVaultManager, VaultManager, VaultSession};
 
+#[cfg(any(test, debug_assertions))]
+struct MockEnclave;
+
+#[cfg(any(test, debug_assertions))]
+impl scb_vka_hsp::HardwareEnclave for MockEnclave {
+    fn sign_with_hardware_key(
+        &self,
+        ur: &[u8; 64],
+    ) -> Result<[u8; 64], scb_vka_common::error::VaultError> {
+        // Return a dummy derived key
+        let mut out = [0u8; 64];
+        out.copy_from_slice(ur);
+        Ok(out)
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "MockEnclave"
+    }
+
+    fn init_hardware_keys(&self) -> Result<(), scb_vka_common::error::VaultError> {
+        Ok(())
+    }
+
+    fn clear_hardware_keys(&self) -> Result<(), scb_vka_common::error::VaultError> {
+        Ok(())
+    }
+}
+
 const DEFAULT_VAULT_PATH: &str = scb_vka_common::config::DEFAULT_VAULT_PATH;
 
 // =============================================================================
@@ -49,6 +77,10 @@ struct Cli {
 
     #[arg(long = "CLEANHWKEYS")]
     cleanhwkeys: bool,
+
+    #[cfg(any(test, debug_assertions))]
+    #[arg(long = "test-mock-enclave", hide = true)]
+    test_mock_enclave: bool,
 
     #[command(subcommand)]
     cmd: Option<Commands>,
@@ -127,9 +159,24 @@ fn prompt_password(confirm: bool) -> Result<Zeroizing<String>> {
         eprintln!();
     }
 
-    let password = Zeroizing::new(
-        rpassword::prompt_password("Password: ").context("Failed to read password")?,
-    );
+    use std::io::{IsTerminal, Write};
+    let read_pwd = |prompt: &str| -> Result<String> {
+        if std::io::stdin().is_terminal() {
+            eprint!("{} ", prompt);
+            std::io::stderr().flush().unwrap();
+            rpassword::read_password().context("Failed to read password")
+        } else {
+            let mut buffer = String::new();
+            std::io::stdin()
+                .read_line(&mut buffer)
+                .context("Failed to read piped password")?;
+            Ok(buffer
+                .trim_end_matches(|c| c == '\r' || c == '\n')
+                .to_string())
+        }
+    };
+
+    let password = Zeroizing::new(read_pwd("Password:")?);
 
     if password.is_empty() {
         anyhow::bail!("Password cannot be empty");
@@ -140,10 +187,7 @@ fn prompt_password(confirm: bool) -> Result<Zeroizing<String>> {
     }
 
     if confirm {
-        let confirm = Zeroizing::new(
-            rpassword::prompt_password("Confirm password: ")
-                .context("Failed to read password confirmation")?,
-        );
+        let confirm = Zeroizing::new(read_pwd("Confirm password:")?);
         if *password != *confirm {
             anyhow::bail!("Passwords do not match");
         }
@@ -407,6 +451,14 @@ fn run() -> Result<()> {
         .with_line_number(false)
         .init();
 
+    #[cfg(any(test, debug_assertions))]
+    let manager = if cli.test_mock_enclave {
+        DefaultVaultManager::new_with(Box::new(MockEnclave))
+    } else {
+        DefaultVaultManager::new()
+    };
+
+    #[cfg(not(any(test, debug_assertions)))]
     let manager = DefaultVaultManager::new();
 
     if cli.cleanhwkeys {

@@ -67,3 +67,9 @@ IMPLEMENTATION_REMINDER.md
 .tmp/
 *.tmp
 *.bak
+
+# Tests
+*.profraw
+*.profdata
+coverage/
+

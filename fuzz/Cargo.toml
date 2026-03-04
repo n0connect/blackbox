@@ -1,0 +1,42 @@
+[package]
+name = "scb-vka-common-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.scb-vka-common]
+path = "../crates/scb-vka-common"
+
+[dependencies.scb-vka-crypto]
+path = "../crates/scb-vka-crypto"
+
+[dependencies.scb-vka-shell]
+path = "../crates/scb-vka-shell"
+
+[dependencies.zeroize]
+version = "1.8.1"
+
+[[bin]]
+name = "fuzz_crypto_decrypt"
+path = "fuzz_targets/fuzz_crypto_decrypt.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_parser"
+path = "fuzz_targets/fuzz_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_ansi"
+path = "fuzz_targets/fuzz_ansi.rs"
+test = false
+doc = false
+bench = false

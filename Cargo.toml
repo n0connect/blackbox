@@ -9,4 +9,5 @@ members = [
     "crates/scb-vka-cli",
     "crates/scb-vka-shell",
     "crates/scb-vka-hsp",
+    "fuzz",
 ]

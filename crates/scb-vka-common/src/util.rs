@@ -53,3 +53,52 @@ pub fn parse_hex_object_id(s: &str) -> Result<[u8; 16], crate::error::VaultError
     buf.copy_from_slice(&bytes);
     Ok(buf)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::VaultErrorKind;
+
+    #[test]
+    fn test_ct_eq() {
+        // Equal slices
+        assert!(ct_eq(b"hello", b"hello"));
+
+        // Different slices
+        assert!(!ct_eq(b"hello", b"world"));
+
+        // Prefix matching
+        assert!(!ct_eq(b"hello", b"hell"));
+
+        // Different lengths
+        assert!(!ct_eq(b"hello", b"hello_world"));
+
+        // Empty slices
+        assert!(ct_eq(b"", b""));
+
+        // One empty slice
+        assert!(!ct_eq(b"a", b""));
+    }
+
+    #[test]
+    fn test_parse_hex_object_id() {
+        let valid_hex = "1234567890abcdef1234567890abcdef";
+        let valid_hex_0x = "0x1234567890abcdef1234567890abcdef";
+        let invalid_hex_chars = "1234567890abcdef1234567890abcdeg";
+        let short_hex = "1234567890abcdef1234567890abcde";
+
+        // Valid tests
+        let id1 = parse_hex_object_id(valid_hex).unwrap();
+        assert_eq!(id1.len(), 16);
+
+        let id2 = parse_hex_object_id(valid_hex_0x).unwrap();
+        assert_eq!(id1, id2);
+
+        // Invalid tests
+        let err1 = parse_hex_object_id(invalid_hex_chars).unwrap_err();
+        assert_eq!(err1.kind, VaultErrorKind::InvalidInput);
+
+        let err2 = parse_hex_object_id(short_hex).unwrap_err();
+        assert_eq!(err2.kind, VaultErrorKind::InvalidInput);
+    }
+}

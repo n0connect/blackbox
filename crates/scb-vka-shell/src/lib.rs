@@ -226,28 +226,7 @@ where
                         // SH-03: Strict whitelisting to prevent Terminal Injection (ANSI escape)
                         // A blacklist is insufficient because of the complexity of terminal emulators.
                         // We ONLY allow printable characters and safe whitespace.
-                        let sanitized: String = text
-                            .chars()
-                            .filter_map(|c| {
-                                // 1. Safe whitespace
-                                if matches!(c, '\n' | '\r' | '\t') {
-                                    Some(c)
-                                }
-                                // 2. Standard printable ASCII (Space to Tilde)
-                                else if ('\x20'..='\x7E').contains(&c) {
-                                    Some(c)
-                                }
-                                // 3. Extended printable characters (Valid Unicode > 0x7F)
-                                // We reject ALL control characters (C0 and C1 sets)
-                                else if c > '\x7F' && !c.is_control() {
-                                    Some(c)
-                                }
-                                // 4. Everything else (including ANSI escapes \x1B) is stripped
-                                else {
-                                    None // Drop the dangerous character completely
-                                }
-                            })
-                            .collect();
+                        let sanitized = sanitize_terminal_output(&text);
                         println!("{sanitized}");
                     }
                     Err(_) => {
@@ -457,5 +436,65 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1}K", bytes as f64 / KB as f64)
     } else {
         format!("{}B", bytes)
+    }
+}
+// =============================================================================
+// UTILS
+// =============================================================================
+
+/// Sanitizes text for terminal output by stripping unsafe control characters and ANSI escapes.
+pub fn sanitize_terminal_output(text: &str) -> String {
+    text.chars()
+        .filter_map(|c| {
+            // 1. Safe whitespace
+            if matches!(c, '\n' | '\r' | '\t') {
+                Some(c)
+            }
+            // 2. Standard printable ASCII (Space to Tilde)
+            else if ('\x20'..='\x7E').contains(&c) {
+                Some(c)
+            }
+            // 3. Extended printable characters (Valid Unicode > 0x7F) reject control characters
+            else if c > '\x7F' && !c.is_control() {
+                Some(c)
+            }
+            // 4. Strip ANSI escapes and other unprintables
+            else {
+                None
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_terminal_sanitization() {
+        // Safe characters
+        assert_eq!(sanitize_terminal_output("Hello World!"), "Hello World!");
+        assert_eq!(
+            sanitize_terminal_output("Line 1\nLine 2\tTabbed"),
+            "Line 1\nLine 2\tTabbed"
+        );
+
+        // ANSI escape dropping (\x1b)
+        let malicious = "Normal \x1b[31mRed Text\x1b[0m Normal";
+        assert_eq!(
+            sanitize_terminal_output(malicious),
+            "Normal [31mRed Text[0m Normal"
+        ); // Escape code \x1b is dropped
+
+        // Terminal ringing and backspace
+        let annoying = "Ring\x07 Backspace\x08";
+        assert_eq!(sanitize_terminal_output(annoying), "Ring Backspace");
+
+        // Extended unicode (Emoji)
+        let unicode = "Turkish: ĞÜŞiöç Emoji: 🦀🔒";
+        assert_eq!(
+            sanitize_terminal_output(unicode),
+            "Turkish: ĞÜŞiöç Emoji: 🦀🔒"
+        );
     }
 }

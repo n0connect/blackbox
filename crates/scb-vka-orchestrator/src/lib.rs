@@ -95,7 +95,10 @@ fn calculate_stream_sizes(data_len: u64) -> Result<(u64, u64, u64), VaultError> 
         .checked_mul(TAG_LEN as u64)
         .ok_or_else(range_err)?;
 
-    let encrypted_payload_size = data_len.checked_add(tag_overhead).ok_or_else(range_err)?;
+    let encrypted_payload_size = data_len
+        .checked_add(tag_overhead)
+        .and_then(|sz| sz.checked_add(scb_vka_common::config::MAC_LEN as u64))
+        .ok_or_else(range_err)?;
 
     let total_size = (WRAPPED_DEK_SIZE as u64)
         .checked_add(NONCE_LEN as u64)
@@ -254,6 +257,21 @@ impl DefaultVaultManager {
         debug!("VaultManager initialized with hardware-backed security");
         Self {
             enclave: scb_vka_hsp::create_platform_enclave(),
+            crypto: DefaultCryptoEngine,
+        }
+    }
+
+    /// Create a new VaultManager instance with a custom hardware enclave (useful for testing or custom deployments).
+    #[must_use]
+    pub fn new_with(enclave: Box<dyn scb_vka_hsp::HardwareEnclave>) -> Self {
+        if scb_vka_memory::disable_core_dumps().is_err() {
+            warn!(
+                "Core dump protection unavailable - sensitive data may be exposed in crash dumps"
+            );
+        }
+
+        Self {
+            enclave,
             crypto: DefaultCryptoEngine,
         }
     }
@@ -566,11 +584,10 @@ impl VaultManager for DefaultVaultManager {
                 session.space_manager.expand(additional_blocks)?;
 
                 let new_len = session.space_manager.total_blocks() * (BLOCK_SIZE as u64);
-                session
-                    .lock
-                    .file_mut()
-                    .set_len(new_len)
-                    .map_err(|_| io_err())?;
+                session.lock.file_mut().set_len(new_len).map_err(|e| {
+                    eprintln!("SET_LEN ERROR: {}", e);
+                    io_err()
+                })?;
 
                 session.space_manager.allocate(num_blocks)?
             }
@@ -582,30 +599,45 @@ impl VaultManager for DefaultVaultManager {
             .lock
             .file_mut()
             .seek(SeekFrom::Start(offset))
-            .map_err(|_| io_err())?;
+            .map_err(|e| {
+                eprintln!("SEEK ERROR: {}", e);
+                io_err()
+            })?;
 
         session
             .lock
             .file_mut()
             .write_all(&wrapped_dek)
-            .map_err(|_| io_err())?;
+            .map_err(|e| {
+                eprintln!("WRITE WRAPPED_DEK ERROR: {}", e);
+                io_err()
+            })?;
 
         let nonce = NonceFactory::generate()?;
         session
             .lock
             .file_mut()
             .write_all(nonce.as_bytes())
-            .map_err(|_| io_err())?;
+            .map_err(|e| {
+                eprintln!("WRITE NONCE ERROR: {}", e);
+                io_err()
+            })?;
 
         let consumed = ConsumedNonce::new(nonce);
         let mut limited_reader = reader.take(data_len);
-        let bytes_written = self.crypto.encrypt_stream(
-            &dek,
-            &mut limited_reader,
-            session.lock.file_mut(),
-            &aad,
-            consumed,
-        )?;
+        let bytes_written = self
+            .crypto
+            .encrypt_stream(
+                &dek,
+                &mut limited_reader,
+                session.lock.file_mut(),
+                &aad,
+                consumed,
+            )
+            .map_err(|e| {
+                eprintln!("ENCRYPT_STREAM ERROR: {:?}", e);
+                e
+            })?;
 
         if bytes_written != encrypted_payload_size {
             session
@@ -614,6 +646,10 @@ impl VaultManager for DefaultVaultManager {
                 .inspect_err(|_| {
                     error!("CRITICAL: Space leak during rollback - bitmap inconsistent");
                 })?;
+            eprintln!(
+                "BYTES_WRITTEN {} != expected {}",
+                bytes_written, encrypted_payload_size
+            );
             return Err(io_err());
         }
 
@@ -1186,5 +1222,125 @@ fn read_encrypted_header(
         (Ok((ha, fta, sma)), Err(_)) => Ok((ha, fta, sma, HEADER_SLOT_A_OFFSET)),
         (Err(_), Ok((hb, ftb, smb))) => Ok((hb, ftb, smb, HEADER_SLOT_B_OFFSET)),
         (Err(_), Err(e)) => Err(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scb_vka_common::error::VaultError;
+    use scb_vka_hsp::HardwareEnclave;
+    use tempfile::TempDir;
+    use zeroize::Zeroizing;
+
+    struct MockEnclave;
+    impl HardwareEnclave for MockEnclave {
+        fn sign_with_hardware_key(&self, ur: &[u8; 64]) -> Result<[u8; 64], VaultError> {
+            let mut mr = [0u8; 64];
+            mr.copy_from_slice(ur);
+            Ok(mr)
+        }
+        fn provider_name(&self) -> &'static str {
+            "Memory Mock"
+        }
+        fn init_hardware_keys(&self) -> Result<(), VaultError> {
+            Ok(())
+        }
+        fn clear_hardware_keys(&self) -> Result<(), VaultError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_full_vault_lifecycle() {
+        let temp_dir = TempDir::new().unwrap();
+        let path_buf = temp_dir.path().join("test_vault.bbox");
+        let path = path_buf.as_path();
+
+        let hw_enclave = Box::new(MockEnclave);
+        let vault_manager = DefaultVaultManager::new_with(hw_enclave);
+        let password = Zeroizing::new(b"StrongVaultPassword123!".to_vec());
+
+        // 1. CREATE VAULT
+        vault_manager
+            .create_vault(path, &password)
+            .expect("Failed to create vault");
+
+        // 2. UNLOCK VAULT
+        let mut session = vault_manager
+            .unlock_vault(path, &password)
+            .expect("Failed to open vault");
+        assert_eq!(vault_manager.list_objects(&session).unwrap().len(), 0);
+
+        // 3. ADD OBJECT
+        let payload1 = b"Hello, encrypted world!";
+        let purpose1 = "test payload 1";
+        let obj_type = "text/plain";
+        let mut cursor1 = std::io::Cursor::new(payload1);
+        let object_id1 = vault_manager
+            .add_object(
+                &mut session,
+                obj_type,
+                purpose1,
+                payload1.len() as u64,
+                &mut cursor1,
+            )
+            .expect("Failed to add object 1");
+
+        let layout_obj1 = vault_manager.list_objects(&session).unwrap();
+        assert_eq!(layout_obj1.len(), 1);
+        assert_eq!(layout_obj1[0].size, payload1.len() as u64);
+
+        // 4. READ OBJECT
+        let mut read_buf1 = Vec::new();
+        vault_manager
+            .read_object(&mut session, &object_id1, &mut read_buf1)
+            .expect("Failed to read object 1");
+        assert_eq!(read_buf1.as_slice(), payload1);
+
+        // 5. ADD SECOND OBJECT
+        let payload2 = b"Second payload with a bit more data.";
+        let purpose2 = "test payload 2";
+        let mut cursor2 = std::io::Cursor::new(payload2);
+        let object_id2 = vault_manager
+            .add_object(
+                &mut session,
+                obj_type,
+                purpose2,
+                payload2.len() as u64,
+                &mut cursor2,
+            )
+            .expect("Failed to add object 2");
+
+        // 6. DELETE FIRST OBJECT
+        vault_manager
+            .delete_object(&mut session, &object_id1)
+            .expect("Failed to delete object 1");
+
+        let layout_obj2 = vault_manager.list_objects(&session).unwrap();
+        assert_eq!(layout_obj2.len(), 1);
+        assert_eq!(layout_obj2[0].object_id, object_id2);
+
+        // 7. VACUUM VAULT
+        vault_manager
+            .vacuum_vault(session, path)
+            .expect("Failed to vacuum vault");
+
+        // 8. VERIFY AFTER VACUUM
+        let mut session_after = vault_manager
+            .unlock_vault(path, &password)
+            .expect("Failed to unlock after vacuum");
+
+        let mut read_buf2 = Vec::new();
+        vault_manager
+            .read_object(&mut session_after, &object_id2, &mut read_buf2)
+            .expect("Failed to read object 2 after vacuum");
+        assert_eq!(read_buf2.as_slice(), payload2);
+
+        // Trying to read deleted object should fail
+        let mut fail_buf = Vec::new();
+        let _err = vault_manager
+            .read_object(&mut session_after, &object_id1, &mut fail_buf)
+            .unwrap_err();
     }
 }

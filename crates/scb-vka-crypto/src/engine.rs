@@ -854,3 +854,94 @@ impl CryptoEngine for DefaultCryptoEngine {
         Ok(total_written)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{AadBuilder, AadPurpose, CryptoVersion, Epoch, KeyKEK, ObjectId};
+    use scb_vka_common::config::{KEY_LEN, NONCE_LEN};
+    use scb_vka_common::error::VaultErrorKind;
+
+    fn create_test_aad() -> AadContext {
+        let oid = ObjectId::new([0; 16]);
+        let ver = CryptoVersion::new(1);
+        let ep = Epoch::new(1);
+        let pur = AadPurpose::UserPurpose([0; 32]);
+        AadBuilder::new()
+            .object_id(oid)
+            .version(ver)
+            .epoch(ep)
+            .purpose(pur)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_encryption_decryption_roundtrip() {
+        let engine = DefaultCryptoEngine::default();
+
+        let dek_vec = engine.csprng(KEY_LEN).expect("CSPRNG failed");
+        let mut dek_arr = [0u8; KEY_LEN];
+        dek_arr.copy_from_slice(&dek_vec);
+        let dek = KeyKEK::new(dek_arr);
+
+        let nonce_bytes = engine.csprng(NONCE_LEN).expect("CSPRNG failed");
+        let mut nonce_arr = [0u8; NONCE_LEN];
+        nonce_arr.copy_from_slice(&nonce_bytes);
+
+        let nonce_for_enc = Nonce::new(nonce_arr);
+        let consumed_nonce = ConsumedNonce::new(nonce_for_enc);
+
+        let plaintext = b"hello world secure payload";
+        let aad = create_test_aad();
+
+        let (ct, tag) = engine
+            .encrypt_object(&dek, plaintext, &aad, consumed_nonce)
+            .unwrap();
+
+        let nonce_for_dec = Nonce::new(nonce_arr);
+        let decrypted = engine
+            .decrypt_object(&dek, nonce_for_dec, &ct, &tag, &aad)
+            .unwrap();
+        assert_eq!(plaintext.as_slice(), decrypted.as_slice());
+    }
+
+    #[test]
+    fn test_mac_verification_failure() {
+        let engine = DefaultCryptoEngine::default();
+        let dek_arr = [0x55; KEY_LEN];
+        let dek = KeyKEK::new(dek_arr);
+
+        let nonce_arr = [0xAA; NONCE_LEN];
+        let nonce_for_enc = Nonce::new(nonce_arr);
+        let consumed_nonce = ConsumedNonce::new(nonce_for_enc);
+
+        let plaintext = b"sensitive data";
+        let aad = create_test_aad();
+
+        let (mut ct, mut tag) = engine
+            .encrypt_object(&dek, plaintext, &aad, consumed_nonce)
+            .unwrap();
+
+        // 1. Corrupt ciphertext
+        ct[0] ^= 0x01;
+        let nonce_for_dec1 = Nonce::new(nonce_arr);
+        let err1 = engine
+            .decrypt_object(&dek, nonce_for_dec1, &ct, &tag, &aad)
+            .err()
+            .unwrap();
+        assert_eq!(err1.kind, VaultErrorKind::AuthenticationFailed);
+
+        // Revert
+        ct[0] ^= 0x01;
+
+        // 2. Corrupt tag
+        tag[0] ^= 0x01;
+        let nonce_for_dec2 = Nonce::new(nonce_arr);
+        let err2 = engine
+            .decrypt_object(&dek, nonce_for_dec2, &ct, &tag, &aad)
+            .err()
+            .unwrap();
+        assert_eq!(err2.kind, VaultErrorKind::AuthenticationFailed);
+    }
+}

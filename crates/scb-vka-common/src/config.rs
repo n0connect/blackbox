@@ -269,3 +269,53 @@ pub const AAD_PURPOSE_HEADER: &[u8] = b"header";
 
 /// AAD Purpose string for Object Data
 pub const AAD_PURPOSE_OBJECT_DATA: &[u8] = b"object_data";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fnv1a_hash() {
+        // Ensure the compile-time hash function is robust and handles empty slices
+        assert_eq!(fnv1a_hash(b""), 0xcbf2_9ce4_8422_2325);
+
+        // Basic known string check
+        let hash1 = fnv1a_hash(b"test");
+        let hash2 = fnv1a_hash(b"test_different");
+        assert_ne!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_config_crypto_bounds() {
+        // Enforce basic cryptography layout boundaries
+        assert!(MIN_PASSWORD_LEN >= 8); // Minimum reasonable
+        assert_eq!(DEK_OVERHEAD, NONCE_LEN + KEY_LEN + TAG_LEN);
+
+        // Ensure Max Object Payload accounts for DEK correctly
+        assert_eq!(
+            MAX_OBJECT_PAYLOAD,
+            (BLOCK_SIZE as usize * 16) - DEK_OVERHEAD - NONCE_LEN - TAG_LEN
+        );
+    }
+
+    #[test]
+    fn test_kdf_argon2_limits() {
+        assert!(ARGON2_MIN_MEMORY_KIB >= 65_536); // At least 64 MiB
+        assert!(ARGON2_MAX_MEMORY_KIB <= 4_194_304); // Reasonable max 4 GiB
+        assert!(ARGON2_MIN_ITERATIONS >= 1);
+        assert!(ARGON2_MAX_PARALLELISM <= 16);
+    }
+
+    #[test]
+    fn test_file_layout_math() {
+        assert_eq!(DATA_REGION_START, 0x0010_0000); // 1 MiB alignment
+        assert!(HEADER_SLOT_A_OFFSET < HEADER_SLOT_B_OFFSET);
+        assert!(HEADER_SLOT_B_OFFSET < DATA_REGION_START);
+
+        // Both headers should perfectly fit before DATA_REGION
+        assert_eq!(
+            HEADER_SLOT_CAPACITY * 2,
+            DATA_REGION_START - SUPERBLOCK_SIZE as u64
+        );
+    }
+}

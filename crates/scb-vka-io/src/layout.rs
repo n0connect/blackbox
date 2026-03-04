@@ -341,3 +341,52 @@ impl FileTableEntry {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_superblock_validation() {
+        let sb = Superblock::new([0; 32], [0; 16], 1234567890, 1024);
+        assert!(sb.validate().is_ok());
+
+        let mut invalid_sb = sb;
+        invalid_sb.version = 0; // Wrong version
+        assert!(invalid_sb.validate().is_err());
+
+        let mut invalid_magic = sb;
+        invalid_magic.magic = [0; 8];
+        assert!(invalid_magic.validate().is_err());
+
+        let mut invalid_blocks = sb;
+        invalid_blocks.total_blocks = 10; // Below MIN_TOTAL_BLOCKS
+        assert!(invalid_blocks.validate().is_err());
+    }
+
+    #[test]
+    fn test_vault_header_epoch() {
+        let mut header = VaultHeader::new(1, 100);
+        assert_eq!(header.epoch(), 100);
+        header.increment_epoch().unwrap();
+        assert_eq!(header.epoch(), 101);
+    }
+
+    #[test]
+    fn test_file_table_entry_epoch() {
+        let entry = FileTableEntry::new(
+            [0; 16],
+            0,
+            1,
+            100,
+            1234,
+            [0; 32],
+            [0; 32],
+            [0; WRAPPED_DEK_SIZE],
+            100,
+        );
+        assert!(entry.validate_epoch(100).is_ok()); // Same epoch
+        assert!(entry.validate_epoch(101).is_ok()); // Header is newer
+        assert!(entry.validate_epoch(99).is_err()); // Header is older, entry is bad!
+    }
+}

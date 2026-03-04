@@ -201,3 +201,51 @@ impl SpaceManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_space_manager_allocation() {
+        // Create a SpaceManager with 512 blocks. First 256 are reserved.
+        let mut sm = SpaceManager::new(512).unwrap();
+        assert_eq!(sm.total_blocks(), 512);
+
+        // Allocate 10 blocks (should start exactly after reserved)
+        let block_idx = sm.allocate(10).unwrap();
+        assert_eq!(block_idx, 256);
+
+        // Allocate 5 more
+        let block_idx2 = sm.allocate(5).unwrap();
+        assert_eq!(block_idx2, 266);
+
+        // Deallocate the first 10
+        assert!(sm.deallocate(256, 10).is_ok());
+
+        // Allocate 8 blocks (should reuse the freed space at 256)
+        let block_idx3 = sm.allocate(8).unwrap();
+        assert_eq!(block_idx3, 256);
+
+        // Allocating past capacity should fail
+        assert!(sm.allocate(1000).is_err());
+
+        // Out-of-bounds deallocation should fail
+        assert!(sm.deallocate(1000, 10).is_err());
+    }
+
+    #[test]
+    fn test_space_manager_expansion() {
+        let mut sm = SpaceManager::new(300).unwrap();
+        // Expand by 100 blocks
+        assert!(sm.expand(100).is_ok());
+        assert_eq!(sm.total_blocks(), 400);
+
+        // Ensure we can allocate in the newly expanded space
+        let block_idx = sm.allocate(100).unwrap();
+        assert_eq!(block_idx, 256); // 256-355
+
+        let block_idx2 = sm.allocate(44).unwrap();
+        assert_eq!(block_idx2, 356); // 356-399
+    }
+}

@@ -372,3 +372,41 @@ fn overwrite_pass<W: Write + Seek>(
     chunk.zeroize();
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use scb_vka_common::error::VaultErrorKind;
+    use std::io::Cursor;
+
+    #[test]
+    fn test_secure_buffer_bounds() {
+        // Valid allocation within limit
+        let buf = SecureBuffer::new(1024).expect("Failed to allocate 1KB SecureBuffer");
+        assert_eq!(buf.len(), 1024);
+
+        // Invalid allocation (exceeds MAX_SIZE)
+        let too_large = SecureBuffer::MAX_SIZE + 1;
+        let err = SecureBuffer::new(too_large).err().unwrap();
+        // VaultErrorKind is not exported with Eq directly on VaultError, so we match on kind if possible,
+        // or just format and check
+        assert_eq!(err.kind, VaultErrorKind::ParameterOutOfRange);
+    }
+
+    #[test]
+    fn test_secure_wipe_execution() {
+        let mut data = vec![0xFF; 1024];
+        let mut cursor = Cursor::new(&mut data);
+
+        // Wipe the first 512 bytes
+        secure_wipe(&mut cursor, 0, 512).expect("Secure wipe failed");
+
+        let inner = cursor.into_inner();
+
+        // Ensure remaining 512 bytes are untouched
+        assert!(inner[512..1024].iter().all(|&b| b == 0xFF));
+
+        // The first 512 bytes are wiped with random data (pass 3), so we just verify they aren't all 0xFF
+        assert!(!inner[0..512].iter().all(|&b| b == 0xFF));
+    }
+}
