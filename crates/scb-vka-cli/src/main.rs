@@ -211,7 +211,7 @@ fn unlock_vault(
     if !quiet {
         info!("Opening vault at {}", path.display());
     }
-    info!("Deriving keys (requires ~1GB RAM, please wait)...");
+    info!("Deriving keys (this may take a moment, ~64MB RAM)...");
 
     manager
         .unlock_vault(path, password.as_bytes())
