@@ -522,10 +522,18 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 
 All commands prompt for password interactively. Password is never passed via command line.
 
+### Initialize Hardware (First Run)
+
+Before creating any vaults, you must initialize the hardware security module. This is a one-time operation per device that creates a permanent, non-exportable key in the Secure Enclave or TPM.
+
+```bash
+./target/release/bb init
+```
+
 ### Create a Vault
 
 ```bash
-./blackbox create --vault my.bbx
+./target/release/bb create --vault my.bbx
 # Password: [hidden input]
 # Confirm password: [hidden input]
 ```
@@ -534,38 +542,38 @@ All commands prompt for password interactively. Password is never passed via com
 
 ```bash
 # From a file
-./blackbox add --vault my.bbx --file document.pdf --purpose "backup"
+./target/release/bb add --vault my.bbx --file document.pdf --purpose "backup"
 
 # From inline data
-./blackbox add --vault my.bbx --data "secret text" --purpose "note"
+./target/release/bb add --vault my.bbx --data "secret text" --purpose "note"
 ```
 
 ### Read an Object
 
 ```bash
 # To file
-./blackbox read --vault my.bbx --id <OBJECT_ID> --output restored.pdf
+./target/release/bb read --vault my.bbx --id <OBJECT_ID> --output restored.pdf
 
 # To stdout
-./blackbox read --vault my.bbx --id <OBJECT_ID>
+./target/release/bb read --vault my.bbx --id <OBJECT_ID>
 ```
 
 ### List Objects
 
 ```bash
-./blackbox list --vault my.bbx
+./target/release/bb list --vault my.bbx
 ```
 
 ### Delete an Object
 
 ```bash
-./blackbox delete --vault my.bbx --id <OBJECT_ID>
+./target/release/bb delete --vault my.bbx --id <OBJECT_ID>
 ```
 
 ### Compact Vault (Vacuum)
 
 ```bash
-./blackbox vacuum --vault my.bbx
+./target/release/bb vacuum --vault my.bbx
 # Reclaims space from deleted objects
 ```
 
@@ -581,9 +589,23 @@ Shell commands: `ls`, `cat <id>`, `rm <id>`, `help`, `exit`
 
 ## Compilation
 
+BlackBox uses `make` to orchestrate the build process, especially on macOS where it must be properly signed and packaged into a `.app` bundle to access the Secure Enclave.
+
+### Setup (macOS only)
+
+1. Copy the example environment file:
+   ```bash
+   cp tools/macos_signing/.env.example .env
+   ```
+2. Edit `.env` and fill in your Apple Developer `TEAM_ID` and `PROVISION_PROFILE` path.
+
+### Build
+
 ```bash
-cargo build --release
+make build
 ```
+
+This will run `cargo build --release`, package the binary, and strictly sign it with entitlements. A convenience symlink will be created at `./target/release/bb`.
 
 > **Note:** KDF always uses minimum 64 MiB memory for brute-force resistance.
 
