@@ -484,6 +484,10 @@ impl HardwareEnclave for MacOSEnclave {
         Ok(())
     }
 
+    fn has_hardware_key(&self) -> bool {
+        self.find_existing_key().is_some()
+    }
+
     fn clear_hardware_keys(&self) -> Result<(), VaultError> {
         unsafe {
             let mut query: CFMutableDictionary<CFString, CFType> = CFMutableDictionary::new();

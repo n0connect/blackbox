@@ -71,6 +71,9 @@ pub trait HardwareEnclave: Send + Sync {
     /// Returns Ok if already initialized or successful.
     fn init_hardware_keys(&self) -> Result<(), VaultError>;
 
+    /// Check whether a hardware key already exists without creating one.
+    fn has_hardware_key(&self) -> bool;
+
     /// Permanently delete the hardware-bound keys generated for this enclave.
     /// This is an irreversible operation and will make all vaults relying on
     /// this key unrecoverable.

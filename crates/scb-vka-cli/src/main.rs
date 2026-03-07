@@ -48,6 +48,10 @@ impl scb_vka_hsp::HardwareEnclave for MockEnclave {
         Ok(())
     }
 
+    fn has_hardware_key(&self) -> bool {
+        false
+    }
+
     fn clear_hardware_keys(&self) -> Result<(), scb_vka_common::error::VaultError> {
         Ok(())
     }
@@ -408,6 +412,12 @@ fn cmd_init(manager: &DefaultVaultManager, quiet: bool) -> Result<()> {
     if !quiet {
         info!("Initializing hardware security keys...");
     }
+
+    // Check if keys already exist — init must only run ONCE per device, ever.
+    if manager.has_hardware_key() {
+        anyhow::bail!("Hardware keys already initialized. Re-initialization is forbidden. This is by design: the Secure Enclave key is permanent and tied to this device.");
+    }
+
     manager
         .init_hardware()
         .context("Failed to initialize hardware keys")?;

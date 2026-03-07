@@ -222,6 +222,9 @@ pub trait VaultManager {
     /// Initialize the hardware-backed cryptographic keys (creates persistent key if missing).
     fn init_hardware(&self) -> Result<(), VaultError>;
 
+    /// Check whether the hardware key already exists (without creating one).
+    fn has_hardware_key(&self) -> bool;
+
     /// Erase all hardware-bound cryptographic keys (e.g., Secure Enclave, TPM) from the system.
     fn clear_hardware_keys(&self) -> Result<(), VaultError>;
 }
@@ -516,6 +519,10 @@ impl VaultManager for DefaultVaultManager {
 
     fn init_hardware(&self) -> Result<(), VaultError> {
         self.enclave.init_hardware_keys()
+    }
+
+    fn has_hardware_key(&self) -> bool {
+        self.enclave.has_hardware_key()
     }
 
     fn clear_hardware_keys(&self) -> Result<(), VaultError> {
@@ -1239,6 +1246,9 @@ mod tests {
         }
         fn init_hardware_keys(&self) -> Result<(), VaultError> {
             Ok(())
+        }
+        fn has_hardware_key(&self) -> bool {
+            false
         }
         fn clear_hardware_keys(&self) -> Result<(), VaultError> {
             Ok(())
