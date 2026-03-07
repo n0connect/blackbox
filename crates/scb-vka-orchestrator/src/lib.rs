@@ -381,10 +381,10 @@ impl VaultManager for DefaultVaultManager {
             return Err(VaultError::new(VaultErrorKind::InvalidInput));
         }
 
-        info!(
+        debug!(
             path = %path.display(),
             kdf_memory_mib = KDF_MEMORY_KIB_MIN / 1024,
-            "Creating new vault - key derivation requires significant memory"
+            "Creating new vault"
         );
 
         let salt_vec = self.crypto.csprng(SALT_LEN)?;
@@ -464,7 +464,7 @@ impl VaultManager for DefaultVaultManager {
         mk.zeroize();
         ck.zeroize();
 
-        info!(
+        debug!(
             vid = %hex::encode(&vid[..8]),
             path = %path.display(),
             "Vault created successfully"
@@ -1200,14 +1200,10 @@ fn read_encrypted_header(
 
     match (&slot_a, &slot_b) {
         (Ok(_), Err(_)) => {
-            warn!(
-                "Header slot B is corrupted - using slot A (vault may have crashed during write)"
-            );
+            debug!("Header slot B is corrupted - using slot A");
         }
         (Err(_), Ok(_)) => {
-            warn!(
-                "Header slot A is corrupted - using slot B (vault may have crashed during write)"
-            );
+            debug!("Header slot A is corrupted - using slot B");
         }
         _ => {}
     }
