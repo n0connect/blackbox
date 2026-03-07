@@ -19,10 +19,10 @@ build:
 	@echo "==> Creating BlackBox.app Bundle..."
 	@mkdir -p $(APP_BUNDLE)/Contents/MacOS
 	@cp target/release/blackbox $(APP_BUNDLE)/Contents/MacOS/blackbox
-	@cp Info.plist $(APP_BUNDLE)/Contents/Info.plist
+	@cp tools/macos_signing/Info.plist $(APP_BUNDLE)/Contents/Info.plist
 	@cp "$(PROVISION_PROFILE)" $(APP_BUNDLE)/Contents/embedded.provisionprofile
 	@echo "==> Signing BlackBox.app with Secure Enclave Entitlements..."
-	codesign -s "$(SIGN_IDENTITY)" --entitlements entitlements.plist --force $(APP_BUNDLE)
+	codesign -s "$(SIGN_IDENTITY)" --entitlements tools/macos_signing/entitlements.plist --force $(APP_BUNDLE)
 	@echo "==> Creating convenience symlink..."
 	@ln -sf BlackBox.app/Contents/MacOS/blackbox target/release/bb
 	@echo "==> Build complete! Run with: ./target/release/bb"
