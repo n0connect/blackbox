@@ -21,6 +21,7 @@ $RECYCLE.BIN/
 *.sublime-*
 
 # Local env / secrets (never commit)
+tools/macos_signing/
 .env
 .env.local
 *.local
