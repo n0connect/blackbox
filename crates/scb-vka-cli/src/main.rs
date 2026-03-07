@@ -209,9 +209,8 @@ fn unlock_vault(
     quiet: bool,
 ) -> Result<VaultSession> {
     if !quiet {
-        info!("Opening vault at {}", path.display());
+        info!("Opening vault at {}...", path.display());
     }
-    info!("Deriving keys (this may take a moment, ~64MB RAM)...");
 
     manager
         .unlock_vault(path, password.as_bytes())
@@ -242,19 +241,14 @@ fn cmd_create(manager: &DefaultVaultManager, path: &std::path::Path, quiet: bool
     }
 
     if !quiet {
-        info!("Creating vault at {}", path.display());
+        info!("Creating vault at {}...", path.display());
     }
-    info!("Deriving keys (this may take a moment, ~64MB RAM)...");
 
-    let vault_info = manager
+    let _vault_info = manager
         .create_vault(path, password.as_bytes())
         .context("Failed to create vault")?;
 
-    info!(
-        "Vault created successfully: {} (vid: {})",
-        path.display(),
-        hex::encode(&vault_info.vid[..8])
-    );
+    info!("Vault created: {}", path.display());
 
     Ok(())
 }

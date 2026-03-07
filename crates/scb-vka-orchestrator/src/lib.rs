@@ -319,8 +319,8 @@ impl DefaultVaultManager {
 
         let superblock = Superblock::parse(&sb_bytes[..])?;
 
-        info!(
-            "Deriving keys using Argon2id with {} MiB memory - this may take a moment",
+        debug!(
+            "Deriving keys using Argon2id with {} MiB memory",
             KDF_MEMORY_KIB_MIN / 1024
         );
 
@@ -349,7 +349,7 @@ impl DefaultVaultManager {
             return Err(integrity_err());
         }
 
-        info!(
+        debug!(
             vid = %hex::encode(&superblock.vid()[..8]),
             objects = header.entry_count(),
             "Vault unlocked successfully"
@@ -513,7 +513,7 @@ impl VaultManager for DefaultVaultManager {
         // O3: Zeroize bitmap to prevent object-location metadata leakage
         let mut bitmap = session.space_manager.export_bitmap();
         bitmap.zeroize();
-        info!(vid = %hex::encode(&vid[..8]), "Vault locked - key material zeroized");
+        debug!(vid = %hex::encode(&vid[..8]), "Vault locked");
         Ok(())
     }
 
@@ -676,11 +676,11 @@ impl VaultManager for DefaultVaultManager {
         session.file_table.push(entry);
         self.commit_header(session)?;
 
-        info!(
+        debug!(
             vid = %hex::encode(&session.vid[..8]),
             object_id = %hex::encode(oid_bytes),
             size = data_len,
-            "Object encrypted and added"
+            "Object added"
         );
         Ok(oid_bytes)
     }
@@ -758,11 +758,11 @@ impl VaultManager for DefaultVaultManager {
             return Err(integrity_err());
         }
 
-        info!(
+        debug!(
             vid = %hex::encode(&session.vid[..8]),
             object_id = %hex::encode(object_id),
             bytes = bytes_written,
-            "Object decrypted and read"
+            "Object read"
         );
         Ok(bytes_written)
     }
