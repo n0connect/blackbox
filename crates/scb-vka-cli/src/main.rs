@@ -144,8 +144,6 @@ pub fn parse_object_id(s: &str) -> Result<[u8; 16]> {
         .map_err(|_| anyhow::anyhow!("ID must be 32 hex characters"))
 }
 
-/// Prompt for password with optional confirmation.
-/// Returns Zeroizing<String> to ensure password is cleared from memory.
 fn prompt_password(confirm: bool) -> Result<Zeroizing<String>> {
     if confirm {
         eprintln!(
@@ -178,24 +176,29 @@ fn prompt_password(confirm: bool) -> Result<Zeroizing<String>> {
         }
     };
 
-    let password = Zeroizing::new(read_pwd("Password:")?);
+    loop {
+        let password = Zeroizing::new(read_pwd("Password:")?);
 
-    if password.is_empty() {
-        anyhow::bail!("Password cannot be empty");
-    }
-
-    if password.len() < 8 {
-        anyhow::bail!("Password must be at least 8 characters");
-    }
-
-    if confirm {
-        let confirm = Zeroizing::new(read_pwd("Confirm password:")?);
-        if *password != *confirm {
-            anyhow::bail!("Passwords do not match");
+        if password.is_empty() {
+            eprintln!("Error: Password cannot be empty. Please try again.");
+            continue;
         }
-    }
 
-    Ok(password)
+        if password.len() < 8 {
+            eprintln!("Error: Password must be at least 8 characters. Please try again.");
+            continue;
+        }
+
+        if confirm {
+            let confirm_pwd = Zeroizing::new(read_pwd("Confirm password:")?);
+            if *password != *confirm_pwd {
+                eprintln!("Error: Passwords do not match. Please try again.");
+                continue;
+            }
+        }
+
+        return Ok(password);
+    }
 }
 
 /// Unlock vault with standardized logging
@@ -241,7 +244,7 @@ fn cmd_create(manager: &DefaultVaultManager, path: &std::path::Path, quiet: bool
     if !quiet {
         info!("Creating vault at {}", path.display());
     }
-    info!("Deriving keys (It may take time, requires ~1GB RAM, please wait)...");
+    info!("Deriving keys (this may take a moment, ~64MB RAM)...");
 
     let vault_info = manager
         .create_vault(path, password.as_bytes())
