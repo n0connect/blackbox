@@ -437,7 +437,7 @@ impl VaultManager for DefaultVaultManager {
             file.write_all(superblock.as_bytes())
                 .map_err(|_| io_err())?;
 
-            let mut header = VaultHeader::new(CRYPTO_VERSION, 1);
+            let mut header = VaultHeader::new(CRYPTO_VERSION, 1, superblock.total_blocks());
 
             let space_manager = SpaceManager::new(total_blocks)?;
             write_encrypted_header(
@@ -1034,6 +1034,7 @@ fn write_encrypted_header(
 
     let bitmap_len = u32::try_from(bitmap.len()).map_err(|_| capacity_err())?;
     header.update_bitmap_size(bitmap_len);
+    header.set_total_blocks(space_manager.total_blocks());
 
     // Early size validation to prevent DoS via memory exhaustion
     let header_struct_size = std::mem::size_of::<VaultHeader>();
@@ -1150,7 +1151,13 @@ fn try_read_slot(
     let bitmap_start = header_struct_size;
     let bitmap_size = header.bitmap_size() as usize;
 
-    let expected_bitmap_size = (superblock.total_blocks() as usize).div_ceil(8);
+    let active_total_blocks = if header.total_blocks() > 0 {
+        header.total_blocks()
+    } else {
+        superblock.total_blocks() // Backwards compatibility for early v1 vaults
+    };
+
+    let expected_bitmap_size = (active_total_blocks as usize).div_ceil(8);
     if bitmap_size != expected_bitmap_size {
         return Err(integrity_err());
     }
@@ -1160,7 +1167,7 @@ fn try_read_slot(
     }
 
     let bitmap = pt[bitmap_start..bitmap_start + bitmap_size].to_vec();
-    let space_manager = SpaceManager::from_bytes(bitmap, superblock.total_blocks())?;
+    let space_manager = SpaceManager::from_bytes(bitmap, active_total_blocks)?;
 
     let mut file_table = Vec::with_capacity(header.entry_count() as usize);
     let mut offset = bitmap_start + bitmap_size;

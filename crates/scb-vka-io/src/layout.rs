@@ -140,14 +140,15 @@ pub struct VaultHeader {
     pub(crate) crypto_version: u32,
     _pad2: u32,
     pub(crate) epoch: u64,
+    pub(crate) total_blocks: u64,
     #[zeroize(skip)]
-    reserved: [u8; 16],
+    reserved: [u8; 8],
 }
 const_assert!(std::mem::size_of::<VaultHeader>() == 56);
 
 impl VaultHeader {
     /// Create new header
-    pub fn new(crypto_version: u32, epoch: u64) -> Self {
+    pub fn new(crypto_version: u32, epoch: u64, total_blocks: u64) -> Self {
         Self {
             magic: MAGIC_FILE_TABLE,
             entry_count: 0,
@@ -157,7 +158,8 @@ impl VaultHeader {
             crypto_version,
             _pad2: 0,
             epoch,
-            reserved: [0u8; 16],
+            total_blocks,
+            reserved: [0u8; 8],
         }
     }
 
@@ -213,6 +215,14 @@ impl VaultHeader {
     /// Set Bitmap Size (must be called before serialization)
     pub fn update_bitmap_size(&mut self, size: u32) {
         self.bitmap_size = size;
+    }
+    /// Get Total Blocks (Dynamic Capacity)
+    pub fn total_blocks(&self) -> u64 {
+        self.total_blocks
+    }
+    /// Set Total Blocks
+    pub fn set_total_blocks(&mut self, blocks: u64) {
+        self.total_blocks = blocks;
     }
 }
 
@@ -366,7 +376,7 @@ mod tests {
 
     #[test]
     fn test_vault_header_epoch() {
-        let mut header = VaultHeader::new(1, 100);
+        let mut header = VaultHeader::new(1, 100, 1024);
         assert_eq!(header.epoch(), 100);
         header.increment_epoch().unwrap();
         assert_eq!(header.epoch(), 101);
