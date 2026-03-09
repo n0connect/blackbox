@@ -1,0 +1,77 @@
+# Build
+target/
+**/*.rs.bk
+# Cargo.lock is tracked for reproducible builds
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+*.swp
+*~
+
+# Windows
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.sublime-*
+
+# Local env / secrets (never commit)
+tools/macos_signing/
+.env
+.env.local
+*.local
+*.pem
+*.key
+
+# Test / debug outputs
+*.log
+/test-vaults/
+/tmp/
+
+# Sandbox: demo vaults and logs stay local (never commit)
+/sandbox/vaults/
+/sandbox/logs/
+/sandbox/*.scb
+/sandbox/*.bbx
+/sandbox/*.box
+/sandbox/*.vault
+/sandbox/*.log
+
+# Global Vault Files (prevent accidental commit of sensitive vaults)
+*.bbx
+*.box
+*.vault
+.vacuum-*.tmp
+
+# Agent/implementation reminder (not versioned)
+IMPLEMENTATION_REMINDER.md
+
+# AI Assistants & Bots
+.gemini/
+.agents/
+.cline/
+.cursor/
+.cursorignore
+.copilot/
+.coderabbit.yaml
+
+# Archives & Temporary files
+*.zip
+*.tar.gz
+*.rar
+/tmp/
+.tmp/
+*.tmp
+*.bak
+
+# Tests
+*.profraw
+*.profdata
+coverage/
+
+target/release/BlackBox.app/

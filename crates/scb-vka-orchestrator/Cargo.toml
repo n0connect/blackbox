@@ -1,0 +1,24 @@
+[package]
+name = "scb-vka-orchestrator"
+version = "1.0.0"
+edition = "2021"
+description = "SCB-VKA vault lifecycle (VaultManager)"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = []
+
+[dependencies]
+zeroize = "1.8"
+scb-vka-common = { path = "../scb-vka-common" }
+scb-vka-io = { path = "../scb-vka-io" }
+scb-vka-crypto = { path = "../scb-vka-crypto" }
+scb-vka-memory = { path = "../scb-vka-memory" }
+scb-vka-hsp = { path = "../scb-vka-hsp" }
+zerocopy = "0.7"
+tracing = "0.1.44"
+hex = "0.4.3"
+static_assertions = "1.1"
+
+[dev-dependencies]
+tempfile = "3.25.0"

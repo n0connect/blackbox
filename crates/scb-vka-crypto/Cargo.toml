@@ -1,0 +1,22 @@
+[package]
+name = "scb-vka-crypto"
+version = "1.0.0"
+edition = "2021"
+description = "SCB-VKA cryptographic core (CryptoEngine)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+aead = "0.5"
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+getrandom = "0.2"
+hmac = "0.12"
+hkdf = "0.12"
+sha3 = "0.10"
+subtle = "2.5"
+zeroize = { version = "1.8", features = ["derive"] }
+scb-vka-common = { path = "../scb-vka-common" }
+scb-vka-memory = { path = "../scb-vka-memory" }
+scb-vka-hsp = { path = "../scb-vka-hsp" }
+
+[features]

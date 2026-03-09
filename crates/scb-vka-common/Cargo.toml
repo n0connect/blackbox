@@ -1,0 +1,18 @@
+[package]
+name = "scb-vka-common"
+version = "1.0.0"
+edition = "2021"
+description = "SCB-VKA common utilities (Config, Error, Log)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+hex = "0.4"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"], optional = true }
+subtle = "2.6.1"
+static_assertions = "1.1.0"
+tracing = "0.1.44"
+# For const hashing if needed, or we implement simple const fn FNV-1a
+# No extra dep needed for simple const fn hash.
+
+[features]

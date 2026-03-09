@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/scb-vka-common",
+    "crates/scb-vka-crypto",
+    "crates/scb-vka-memory",
+    "crates/scb-vka-io",
+    "crates/scb-vka-orchestrator",
+    "crates/scb-vka-cli",
+    "crates/scb-vka-shell",
+    "crates/scb-vka-hsp",
+    "fuzz",
+]

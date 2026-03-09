@@ -1,0 +1,30 @@
+[package]
+name = "scb-vka-hsp"
+version = "1.0.0"
+edition = "2021"
+description = "Hardware Security Provider - Native hardware enclave integrations (TPM 2.0 / Secure Enclave)"
+
+[dependencies]
+scb-vka-common = { path = "../scb-vka-common" }
+zeroize = { version = "1.8", features = ["derive"] }
+sha2 = "0.10"
+sha3 = "0.10"
+tracing = "0.1"
+static_assertions = "1.1"
+
+# =============================================================================
+# PLATFORM-SPECIFIC DEPENDENCIES
+# =============================================================================
+
+# macOS: Apple Secure Enclave via Security.framework + P-256 hash-to-curve
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2.11"
+security-framework-sys = "2.12"
+core-foundation = "0.9"
+core-foundation-sys = "0.8"
+p256 = { version = "0.13", features = ["ecdh", "hash2curve"] }
+elliptic-curve = { version = "0.13", features = ["hash2curve"] }
+
+# Linux & Windows: TPM 2.0 via tss-esapi
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+tss-esapi = "7.5"

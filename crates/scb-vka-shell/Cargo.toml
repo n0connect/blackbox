@@ -1,0 +1,17 @@
+[package]
+name = "scb-vka-shell"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+scb-vka-common = { path = "../scb-vka-common" }
+scb-vka-io = { path = "../scb-vka-io" }
+scb-vka-orchestrator = { path = "../scb-vka-orchestrator" }
+log = "0.4"
+colored = "2.0"
+hex = "0.4"
+rustyline = "14.0"
+thiserror = "2.0"
+anyhow = "1.0.101"
+tracing = "0.1.44"
+zeroize = "1.8.2"

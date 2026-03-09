@@ -1,0 +1,28 @@
+[package]
+name = "blackbox"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive", "env"] }
+colored = "2.0"
+hex = "0.4"
+rpassword = "7.0"
+scb-vka-common = { path = "../scb-vka-common" }
+scb-vka-orchestrator = { path = "../scb-vka-orchestrator" }
+scb-vka-io = { path = "../scb-vka-io" }
+scb-vka-shell = { path = "../scb-vka-shell" }
+scb-vka-memory = { path = "../scb-vka-memory" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+anyhow = "1.0.101"
+zeroize = "1.8"
+scb-vka-crypto = { version = "1.0.0", path = "../scb-vka-crypto" }
+scb-vka-hsp = { version = "1.0.0", path = "../scb-vka-hsp" }
+
+[dev-dependencies]
+assert_cmd = "2.1.2"
+predicates = "3.1.4"
+tempfile = "3.26.0"

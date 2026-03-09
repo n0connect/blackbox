@@ -1,0 +1,17 @@
+[package]
+name = "scb-vka-memory"
+version = "1.0.0"
+edition = "2021"
+description = "SCB-VKA secure memory (MemoryGuard / SecureMemory)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+zeroize = { version = "1.8", features = ["derive"] }
+scb-vka-common = { path = "../scb-vka-common" }
+getrandom = "0.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading"] }
