@@ -373,7 +373,7 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 │  │  ├─────────────────────┼───────────────────────────┤  │             │
 │  │  │  Salt (32 bytes)    │  VID (16 bytes)           │  │             │
 │  │  ├─────────────────────┼───────────────────────────┤  │             │
-│  │  │  Created Timestamp  │  Total Blocks             │  │             │
+│  │  │  Created Timestamp  │  (Reserved / Padding)     │  │             │
 │  │  └─────────────────────┴───────────────────────────┘  │             │
 │  └───────────────────────────────────────────────────────┘             │
 │                                                                        │
@@ -385,7 +385,7 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 │  │  │  ┌─────────────────────────────────────────┐    │  │             │
 │  │  │  │  Wrapped DEK │ Nonce │ Ciphertext │ Tag │    │  │             │
 │  │  │  │  ┌─────────────────────────────────┐    │    │  │   A/B       │
-│  │  │  │  │  VaultHeader (epoch, count)     │    │    │  │ Ping-Pong   │
+│  │  │  │  │  VaultHeader (epoch, blocks)    │    │    │  │ Ping-Pong   │
 │  │  │  │  │  Bitmap (space allocation)      │    │    │  │  Design     │
 │  │  │  │  │  FileTable (object metadata)    │    │    │  │             │
 │  │  │  │  └─────────────────────────────────┘    │    │  │             │
