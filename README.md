@@ -607,8 +607,6 @@ make build
 
 This will run `cargo build --release`, package the binary, and strictly sign it with entitlements. A convenience symlink will be created at `./target/release/bb`.
 
-> **Note:** KDF always uses minimum 64 MiB memory for brute-force resistance.
-
 ---
 
 ## Platform Support
@@ -629,12 +627,6 @@ This will run `cargo build --release`, package the binary, and strictly sign it 
 │            │  (not supported)│  (not supported)│  (not supported)  │  (not supported)│
 └────────────┴─────────────────┴─────────────────┴───────────────────┴─────────────────┘
 ```
-
----
-
-## License
-
-See LICENSE file.
 
 ---
 
