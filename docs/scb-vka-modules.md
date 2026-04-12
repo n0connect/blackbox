@@ -252,7 +252,7 @@
 ├────────────────┼────────────────────────────────┤
 │ macOS          │ SEPProvider (security-framework)│
 │ Linux          │ TPMProvider (tss-esapi)         │
-│ Windows        │ Compile-time error (backend WIP)│
+│ Windows        │ TPMProvider (TBS native API)    │
 │ Fallback       │ FIDO2Provider (ctap-hid-fido2)  │
 └────────────────┴────────────────────────────────┘
 ```

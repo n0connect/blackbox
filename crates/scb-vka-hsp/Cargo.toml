@@ -28,3 +28,8 @@ elliptic-curve = { version = "0.13", features = ["hash2curve"] }
 # Linux: TPM 2.0 via tss-esapi
 [target.'cfg(target_os = "linux")'.dependencies]
 tss-esapi = "7.5"
+
+# Windows: TPM 2.0 via TBS API
+[target.'cfg(target_os = "windows")'.dependencies]
+scb-vka-memory = { path = "../scb-vka-memory" }
+windows-sys = { version = "0.59", features = ["Win32_System_TpmBaseServices", "Win32_Foundation"] }

@@ -1169,6 +1169,7 @@ dependencies = [
  "elliptic-curve",
  "p256",
  "scb-vka-common",
+ "scb-vka-memory",
  "security-framework",
  "security-framework-sys",
  "sha2",
@@ -1176,6 +1177,7 @@ dependencies = [
  "static_assertions",
  "tracing",
  "tss-esapi",
+ "windows-sys 0.59.0",
  "zeroize",
 ]
 
