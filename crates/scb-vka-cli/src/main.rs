@@ -25,38 +25,6 @@ use zeroize::Zeroizing;
 
 use scb_vka_orchestrator::{DefaultVaultManager, VaultManager, VaultSession};
 
-#[cfg(any(test, debug_assertions))]
-struct MockEnclave;
-
-#[cfg(any(test, debug_assertions))]
-impl scb_vka_hsp::HardwareEnclave for MockEnclave {
-    fn sign_with_hardware_key(
-        &self,
-        ur: &[u8; 64],
-    ) -> Result<[u8; 64], scb_vka_common::error::VaultError> {
-        // Return a dummy derived key
-        let mut out = [0u8; 64];
-        out.copy_from_slice(ur);
-        Ok(out)
-    }
-
-    fn provider_name(&self) -> &'static str {
-        "MockEnclave"
-    }
-
-    fn init_hardware_keys(&self) -> Result<(), scb_vka_common::error::VaultError> {
-        Ok(())
-    }
-
-    fn has_hardware_key(&self) -> bool {
-        false
-    }
-
-    fn clear_hardware_keys(&self) -> Result<(), scb_vka_common::error::VaultError> {
-        Ok(())
-    }
-}
-
 const DEFAULT_VAULT_PATH: &str = scb_vka_common::config::DEFAULT_VAULT_PATH;
 
 // =============================================================================
@@ -81,10 +49,6 @@ struct Cli {
 
     #[arg(long = "CLEANHWKEYS")]
     cleanhwkeys: bool,
-
-    #[cfg(any(test, debug_assertions))]
-    #[arg(long = "test-mock-enclave", hide = true)]
-    test_mock_enclave: bool,
 
     #[command(subcommand)]
     cmd: Option<Commands>,
@@ -165,7 +129,9 @@ fn prompt_password(confirm: bool) -> Result<Zeroizing<String>> {
     let read_pwd = |prompt: &str| -> Result<String> {
         if std::io::stdin().is_terminal() {
             eprint!("{prompt} ");
-            std::io::stderr().flush().unwrap();
+            std::io::stderr()
+                .flush()
+                .context("Failed to flush terminal prompt")?;
             rpassword::read_password().context("Failed to read password")
         } else {
             let mut buffer = String::new();
@@ -224,6 +190,37 @@ fn lock_vault(manager: &DefaultVaultManager, session: VaultSession) -> Result<()
         .context("Failed to securely lock vault - key material may not be fully zeroized")
 }
 
+fn with_unlocked_session<T, F>(
+    manager: &DefaultVaultManager,
+    path: &PathBuf,
+    password: &Zeroizing<String>,
+    quiet: bool,
+    op: F,
+) -> Result<T>
+where
+    F: FnOnce(&mut VaultSession) -> Result<T>,
+{
+    let mut session = unlock_vault(manager, path, password, quiet)?;
+    let op_result = op(&mut session);
+    let lock_result = lock_vault(manager, session);
+
+    match (op_result, lock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(op_err), Ok(())) => Err(op_err),
+        (Ok(_), Err(lock_err)) => Err(lock_err),
+        (Err(op_err), Err(lock_err)) => {
+            warn!(
+                operation_error = %op_err,
+                lock_error = %lock_err,
+                "Operation failed and session lock cleanup also failed"
+            );
+            Err(op_err.context(format!(
+                "Additionally failed to lock session cleanly: {lock_err:#}"
+            )))
+        }
+    }
+}
+
 // =============================================================================
 // COMMAND HANDLERS
 // =============================================================================
@@ -233,6 +230,13 @@ fn cmd_create(manager: &DefaultVaultManager, path: &std::path::Path, quiet: bool
     manager
         .init_hardware()
         .context("Hardware initialization failed. Vault creation aborted.")?;
+
+    if path.exists() {
+        anyhow::bail!(
+            "Vault already exists at {}. Refusing to overwrite existing vault.",
+            path.display()
+        );
+    }
 
     let password = prompt_password(true)?;
 
@@ -282,14 +286,12 @@ fn cmd_add(
         _ => anyhow::bail!("You must provide either --data or --file"),
     };
 
-    let mut session = unlock_vault(manager, path, &password, quiet)?;
-
-    debug!("Adding object: type={}, purpose={}", type_name, purpose);
-    let object_id = manager
-        .add_object(&mut session, &type_name, &purpose, len, &mut reader)
-        .context("Failed to add object to vault")?;
-
-    lock_vault(manager, session)?;
+    let object_id = with_unlocked_session(manager, path, &password, quiet, |session| {
+        debug!("Adding object: type={}, purpose={}", type_name, purpose);
+        manager
+            .add_object(session, &type_name, &purpose, len, &mut reader)
+            .context("Failed to add object to vault")
+    })?;
 
     let id_hex = hex::encode(object_id);
     info!("Object added: {}", id_hex);
@@ -311,21 +313,29 @@ fn cmd_read(
     let password = prompt_password(false)?;
     let object_id = parse_object_id(&id)?;
 
-    let mut session = unlock_vault(manager, path, &password, quiet)?;
-
-    debug!("Reading object: {}", id);
-
     let mut writer: Box<dyn IoWrite> = if let Some(ref out) = output {
-        Box::new(std::fs::File::create(out).context("Failed to create output file")?)
+        #[allow(unused_mut)]
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options
+            .open(out)
+            .context("Failed to create output file securely")?;
+        Box::new(file)
     } else {
         Box::new(std::io::stdout())
     };
 
-    let bytes_read = manager
-        .read_object(&mut session, &object_id, &mut writer)
-        .context("Failed to read object from vault")?;
-
-    lock_vault(manager, session)?;
+    let bytes_read = with_unlocked_session(manager, path, &password, quiet, |session| {
+        debug!("Reading object: {}", id);
+        manager
+            .read_object(session, &object_id, &mut writer)
+            .context("Failed to read object from vault")
+    })?;
 
     if let Some(out) = output {
         info!("Read {} bytes to {}", bytes_read, out.display());
@@ -339,13 +349,11 @@ fn cmd_read(
 fn cmd_list(manager: &DefaultVaultManager, path: &PathBuf, quiet: bool) -> Result<()> {
     let password = prompt_password(false)?;
 
-    let session = unlock_vault(manager, path, &password, quiet)?;
-
-    let objects = manager
-        .list_objects(&session)
-        .context("Failed to list objects")?;
-
-    lock_vault(manager, session)?;
+    let objects = with_unlocked_session(manager, path, &password, quiet, |session| {
+        manager
+            .list_objects(session)
+            .context("Failed to list objects")
+    })?;
 
     if objects.is_empty() {
         info!("Vault is empty");
@@ -376,14 +384,12 @@ fn cmd_delete(
     let password = prompt_password(false)?;
     let object_id = parse_object_id(&id)?;
 
-    let mut session = unlock_vault(manager, path, &password, quiet)?;
-
-    debug!("Deleting object: {}", id);
-    manager
-        .delete_object(&mut session, &object_id)
-        .context("Failed to delete object")?;
-
-    lock_vault(manager, session)?;
+    with_unlocked_session(manager, path, &password, quiet, |session| {
+        debug!("Deleting object: {}", id);
+        manager
+            .delete_object(session, &object_id)
+            .context("Failed to delete object")
+    })?;
 
     info!("Object deleted: {}", id);
 
@@ -461,14 +467,6 @@ fn run() -> Result<()> {
         .with_line_number(false)
         .init();
 
-    #[cfg(any(test, debug_assertions))]
-    let manager = if cli.test_mock_enclave {
-        DefaultVaultManager::new_with(Box::new(MockEnclave))
-    } else {
-        DefaultVaultManager::new()
-    };
-
-    #[cfg(not(any(test, debug_assertions)))]
     let manager = DefaultVaultManager::new();
 
     if cli.cleanhwkeys {

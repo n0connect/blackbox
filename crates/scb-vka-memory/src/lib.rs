@@ -41,28 +41,9 @@ pub fn harden_process() {
 
     #[cfg(windows)]
     {
-        use windows_sys::Win32::System::Threading::{
-            ProcessDynamicCodePolicy, ProcessSignaturePolicy, SetProcessMitigationPolicy,
-            PROCESS_MITIGATION_DYNAMIC_CODE_POLICY, PROCESS_MITIGATION_SIGNATURE_POLICY,
-        };
-
-        unsafe {
-            let mut dyn_code = std::mem::zeroed::<PROCESS_MITIGATION_DYNAMIC_CODE_POLICY>();
-            dyn_code.set_ProhibitDynamicCode(1);
-            let _ = SetProcessMitigationPolicy(
-                ProcessDynamicCodePolicy,
-                &dyn_code as *const _ as *const std::ffi::c_void,
-                std::mem::size_of::<PROCESS_MITIGATION_DYNAMIC_CODE_POLICY>() as usize,
-            );
-
-            let mut sig_pol = std::mem::zeroed::<PROCESS_MITIGATION_SIGNATURE_POLICY>();
-            sig_pol.set_MicrosoftSignedOnly(1);
-            let _ = SetProcessMitigationPolicy(
-                ProcessSignaturePolicy,
-                &sig_pol as *const _ as *const std::ffi::c_void,
-                std::mem::size_of::<PROCESS_MITIGATION_SIGNATURE_POLICY>() as usize,
-            );
-        }
+        // Keep hardening portable across windows-sys versions.
+        // dump suppression still happens via disable_core_dumps() / SetErrorMode.
+        let _ = disable_core_dumps();
     }
 }
 
@@ -89,48 +70,20 @@ fn mem_unlock(ptr: *const u8, len: usize) {
 
 #[cfg(windows)]
 fn mem_lock(ptr: *const u8, len: usize) -> Result<(), VaultError> {
-    use windows_sys::Win32::System::Diagnostics::Debug::WerRegisterExcludedMemoryBlock;
-    use windows_sys::Win32::System::Memory::{
-        GetProcessWorkingSetSize, SetProcessWorkingSetSize, VirtualLock,
-    };
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Memory::VirtualLock;
 
     unsafe {
-        let process = GetCurrentProcess();
-        let mut min_ws = 0;
-        let mut max_ws = 0;
-
-        // Fetch current working set
-        if GetProcessWorkingSetSize(process, &mut min_ws, &mut max_ws) != 0 {
-            // Expand working set by the required allocation length + 1MB safety margin
-            let expansion = len + 1024 * 1024;
-            let new_min = min_ws + expansion;
-            let new_max = max_ws + expansion;
-
-            // Attempt to increase. If this fails, we still try VirtualLock
-            let _ = SetProcessWorkingSetSize(process, new_min, new_max);
-        }
-
         if VirtualLock(ptr as *mut _, len) == 0 {
-            // VirtualLock failed - may be due to limits even after expansion attempt
             return Err(VaultError::new(VaultErrorKind::OperationFailed));
         }
-
-        // CP-03: Exclude from Windows Error Reporting mini-dumps
-        // Ignore failures as this is defense-in-depth
-        let _ = WerRegisterExcludedMemoryBlock(ptr as *const std::ffi::c_void, len as u32);
     }
     Ok(())
 }
 
 #[cfg(windows)]
 fn mem_unlock(ptr: *const u8, len: usize) {
-    use windows_sys::Win32::System::Diagnostics::Debug::WerUnregisterExcludedMemoryBlock;
     use windows_sys::Win32::System::Memory::VirtualUnlock;
     unsafe {
-        // CP-03: Remove from exclusion list before unlocking memory
-        let _ = WerUnregisterExcludedMemoryBlock(ptr as *const std::ffi::c_void);
-
         // Ignore errors - best effort unlock
         let _ = VirtualUnlock(ptr as *mut _, len);
     }

@@ -2,7 +2,7 @@
 
 ![Rust](https://img.shields.io/badge/Rust-000000?style=for-the-badge&logo=rust&logoColor=white)
 ![Shell](https://img.shields.io/badge/Shell-121011?style=for-the-badge&logo=gnu-bash&logoColor=white)
-![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-informational?style=for-the-badge)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-informational?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-Apache--2.0-blue?style=for-the-badge)
 
 BlackBox is a Zero-Trust, Layered Security vault system designed for extreme data protection. It employs a 512-bit Cryptographic Pipeline, Hardware Security Binding, Memory Hardening, and Streaming I/O to ensure data confidentiality and integrity.
@@ -40,7 +40,7 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
           ╔═══════════════════════════════╧═══════════════════════════════╗
           ║                     HARDWARE ENCLAVE                          ║
           ║  ┌─────────────────────────────────────────────────────────┐  ║
-          ║  │  macOS: Secure Enclave (ECDH)  │  Linux/Win: TPM 2.0    │  ║
+          ║  │  macOS: Secure Enclave (ECDH)  │  Linux: TPM 2.0        │  ║
           ║  └─────────────────────────────────────────────────────────┘  ║
           ║                                                               ║
           ║              HW_KEY + UR ──▶ MR  (key NEVER leaves chip)      ║
@@ -110,7 +110,7 @@ BlackBox is a Zero-Trust, Layered Security vault system designed for extreme dat
 ```
 
 - **512-bit Native Pipeline**: All key derivations use SHA3-512 and Argon2id
-- **Hardware Security Binding**: TPM 2.0 (Linux/Windows) or Secure Enclave (macOS)
+- **Hardware Security Binding**: TPM 2.0 (Linux) or Secure Enclave (macOS)
 - **Zero-Trust Architecture**: Every component assumes hostile environment
 - **Streaming I/O**: 1 MiB chunked encryption with constant memory usage
 - **Authenticated Storage**: XChaCha20-Poly1305 + HMAC-SHA3-256
@@ -526,6 +526,8 @@ All commands prompt for password interactively. Password is never passed via com
 
 Before creating any vaults, you must initialize the hardware security module. This is a one-time operation per device that creates a permanent, non-exportable key in the Secure Enclave or TPM.
 
+On macOS, BlackBox first attempts direct Secure Enclave access. If required provisioning profile/entitlements are missing or outdated, it falls back to a software-isolated Keychain key and prints a warning. This fallback is supported for development continuity, but it increases attack surface. For full trust posture, use direct Secure Enclave mode.
+
 ```bash
 ./target/release/bb init
 ```
@@ -621,7 +623,8 @@ This will run `cargo build --release`, package the binary, and strictly sign it 
 │  macOS     │  mlock/munlock  │  POSIX flock    │  setrlimit        │  Secure Enclave │
 │            │                 │                 │                   │  (T2/M1/M2/M3)  │
 ├────────────┼─────────────────┼─────────────────┼───────────────────┼─────────────────┤
-│  Windows   │  VirtualLock    │  LockFileEx     │  SetErrorMode     │  TPM 2.0 (TBS)  │
+│  Windows   │  Compile Error  │  Compile Error  │  Compile Error    │  Compile Error  │
+│            │                 │                 │                   │  (backend WIP)  │
 ├────────────┼─────────────────┼─────────────────┼───────────────────┼─────────────────┤
 │  Other     │  COMPILE ERROR  │  COMPILE ERROR  │  COMPILE ERROR    │  COMPILE ERROR  │
 │            │  (not supported)│  (not supported)│  (not supported)  │  (not supported)│
@@ -658,7 +661,7 @@ This will run `cargo build --release`, package the binary, and strictly sign it 
 - **zeroize v1.8.x (Rust Crate)**: Secure memory zeroing
 - **aead v0.5.x (Rust Crate)**: AEAD trait abstraction
 - **getrandom v0.2.x (Rust Crate)**: OS-level CSPRNG
-- **tss-esapi v7.5.x (Rust Crate)**: TPM 2.0 integration (Linux/Windows)
+- **tss-esapi v7.5.x (Rust Crate)**: TPM 2.0 integration (Linux)
 - **security-framework v2.11.x (Rust Crate)**: macOS Security.framework bindings (Secure Enclave ECDH)
 - **p256 v0.13.x (Rust Crate)**: P-256 elliptic curve (hash-to-curve, ECDH)
 - **elliptic-curve v0.13.x (Rust Crate)**: Elliptic curve traits (hash2curve feature)

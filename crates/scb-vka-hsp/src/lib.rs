@@ -8,7 +8,6 @@
 //! |----------|----------|----------------|
 //! | macOS    | Secure Enclave (T2/M1/M2/M3) | P-256 ECDH key agreement |
 //! | Linux    | TPM 2.0 | HMAC-SHA256 |
-//! | Windows  | TPM 2.0 (TBS) | HMAC-SHA256 |
 //!
 //! ## Security Model
 //!
@@ -36,7 +35,7 @@
 //!
 //! This crate requires physical hardware security:
 //! - macOS: Secure Enclave (T2 chip or Apple Silicon)
-//! - Linux/Windows: TPM 2.0 module
+//! - Linux: TPM 2.0 module
 //!
 //! Compilation will fail on unsupported platforms.
 
@@ -90,10 +89,10 @@ mod macos;
 #[cfg(target_os = "macos")]
 pub use macos::MacOSEnclave;
 
-// Linux & Windows: TPM 2.0
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+// Linux: TPM 2.0
+#[cfg(target_os = "linux")]
 mod tpm;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(target_os = "linux")]
 pub use tpm::TpmEnclave;
 
 // =============================================================================
@@ -104,8 +103,14 @@ pub use tpm::TpmEnclave;
 #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 compile_error!(
     "scb-vka-hsp requires hardware security support. \
-    Supported platforms: macOS (Secure Enclave), Linux (TPM 2.0), Windows (TPM 2.0). \
+    Supported platforms: macOS (Secure Enclave), Linux (TPM 2.0). \
     Your platform is not supported."
+);
+
+#[cfg(target_os = "windows")]
+compile_error!(
+    "Windows TPM backend is currently unavailable in this build due upstream tss-esapi limitations. \
+     Direct TPM access remains required by design; use Linux/macOS build targets until Windows backend lands."
 );
 
 // =============================================================================
@@ -117,7 +122,6 @@ compile_error!(
 /// # Platform Selection
 /// - macOS: Apple Secure Enclave (SEP)
 /// - Linux: TPM 2.0 via /dev/tpmrm0
-/// - Windows: TPM 2.0 via TBS
 ///
 /// # Panics
 /// This function cannot fail at compile time on supported platforms.
@@ -128,9 +132,17 @@ pub fn create_platform_enclave() -> Box<dyn HardwareEnclave> {
         Box::new(MacOSEnclave::new())
     }
 
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(target_os = "linux")]
     {
         Box::new(TpmEnclave::new())
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        panic!(
+            "Windows TPM backend is unavailable in this build. \
+             Use Linux/macOS build targets until Windows direct TPM implementation is added."
+        )
     }
 }
 

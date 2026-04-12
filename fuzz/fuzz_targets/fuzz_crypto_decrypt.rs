@@ -17,13 +17,16 @@ fuzz_target!(|data: &[u8]| {
     let ver = CryptoVersion::new(1);
     let ep = Epoch::new(1);
     let pur = AadPurpose::UserPurpose([0; 32]);
-    let aad = AadBuilder::new()
+    let aad = match AadBuilder::new()
         .object_id(oid)
         .version(ver)
         .epoch(ep)
         .purpose(pur)
         .build()
-        .unwrap();
+    {
+        Ok(v) => v,
+        Err(_) => return,
+    };
 
     let engine = DefaultCryptoEngine;
     let mut reader = Cursor::new(data);

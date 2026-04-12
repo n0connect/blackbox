@@ -56,9 +56,7 @@ fn test_concurrent_lock_acquisition() {
     let final_success = success_count.load(Ordering::SeqCst);
     let final_busy = busy_count.load(Ordering::SeqCst);
 
-    println!(
-        "Threads completed. Acquired: {final_success}, Busy: {final_busy}"
-    );
+    println!("Threads completed. Acquired: {final_success}, Busy: {final_busy}");
 
     // Assertions
     // At most `num_threads` could succeed, but due to collisions, we expect many `VaultBusy` rejections.

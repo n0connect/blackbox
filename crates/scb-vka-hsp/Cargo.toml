@@ -25,6 +25,6 @@ core-foundation-sys = "0.8"
 p256 = { version = "0.13", features = ["ecdh", "hash2curve"] }
 elliptic-curve = { version = "0.13", features = ["hash2curve"] }
 
-# Linux & Windows: TPM 2.0 via tss-esapi
-[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+# Linux: TPM 2.0 via tss-esapi
+[target.'cfg(target_os = "linux")'.dependencies]
 tss-esapi = "7.5"

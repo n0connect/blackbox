@@ -286,27 +286,40 @@ impl DefaultVaultManager {
     }
 
     fn commit_header(&self, session: &mut VaultSession) -> Result<(), VaultError> {
+        // Transactional guard: keep in-memory state consistent if commit fails.
+        let previous_header = session.header;
+        let previous_slot = session.active_slot_offset;
+
         let entry_count = u32::try_from(session.file_table.len()).map_err(|_| capacity_err())?;
         session.header.update_entry_count(entry_count);
         session.header.increment_epoch()?;
 
-        session.lock.file_mut().sync_all().map_err(|_| io_err())?;
+        let commit_result = (|| -> Result<(), VaultError> {
+            session.lock.file_mut().sync_all().map_err(|_| io_err())?;
 
-        let target_slot = alternate_slot(session.active_slot_offset);
+            let target_slot = alternate_slot(session.active_slot_offset);
 
-        write_encrypted_header(
-            session.lock.file_mut(),
-            &session.kek,
-            &session.mk,
-            &self.crypto,
-            &mut session.header,
-            &session.file_table,
-            &session.space_manager,
-            target_slot,
-        )?;
+            write_encrypted_header(
+                session.lock.file_mut(),
+                &session.kek,
+                &session.mk,
+                &self.crypto,
+                &mut session.header,
+                &session.file_table,
+                &session.space_manager,
+                target_slot,
+            )?;
 
-        session.active_slot_offset = target_slot;
-        Ok(())
+            session.active_slot_offset = target_slot;
+            Ok(())
+        })();
+
+        if commit_result.is_err() {
+            session.header = previous_header;
+            session.active_slot_offset = previous_slot;
+        }
+
+        commit_result
     }
 
     fn unlock_vault_inner(&self, path: &Path, password: &[u8]) -> Result<VaultSession, VaultError> {
@@ -416,7 +429,13 @@ impl VaultManager for DefaultVaultManager {
 
         #[allow(unused_mut)]
         let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(true);
+        options.read(true).write(true).create_new(true);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
 
         #[cfg(windows)]
         {
@@ -424,7 +443,13 @@ impl VaultManager for DefaultVaultManager {
             options.custom_flags(0x80000000); // FILE_FLAG_WRITE_THROUGH
         }
 
-        let mut file = options.open(path).map_err(|_| io_err())?;
+        let mut file = options.open(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                VaultError::new(VaultErrorKind::InvalidInput)
+            } else {
+                io_err()
+            }
+        })?;
 
         let mut do_create = || -> Result<(), VaultError> {
             let total_blocks = MIN_TOTAL_BLOCKS;
@@ -585,104 +610,141 @@ impl VaultManager for DefaultVaultManager {
                     additional_blocks = additional_blocks,
                     "Vault capacity exceeded - dynamically expanding (may cause I/O latency)"
                 );
-                session.space_manager.expand(additional_blocks)?;
+                let new_total_blocks = session
+                    .space_manager
+                    .total_blocks()
+                    .checked_add(additional_blocks)
+                    .ok_or_else(range_err)?;
+                if new_total_blocks > scb_vka_common::config::MAX_TOTAL_BLOCKS {
+                    return Err(capacity_err());
+                }
+                let new_len = new_total_blocks
+                    .checked_mul(BLOCK_SIZE as u64)
+                    .ok_or_else(range_err)?;
 
-                let new_len = session.space_manager.total_blocks() * (BLOCK_SIZE as u64);
-                session.lock.file_mut().set_len(new_len).map_err(|e| {
-                    eprintln!("SET_LEN ERROR: {e}");
-                    io_err()
-                })?;
+                // Grow backing file first; only then update in-memory allocator state.
+                session
+                    .lock
+                    .file_mut()
+                    .set_len(new_len)
+                    .map_err(|_| io_err())?;
+                session.space_manager.expand(additional_blocks)?;
 
                 session.space_manager.allocate(num_blocks)?
             }
             Err(e) => return Err(e),
         };
 
-        let offset = calculate_data_offset(start_block)?;
-        session
-            .lock
-            .file_mut()
-            .seek(SeekFrom::Start(offset))
-            .map_err(|e| {
-                eprintln!("SEEK ERROR: {e}");
-                io_err()
-            })?;
+        // Any failure after this point must rollback allocation to avoid bitmap drift.
+        let add_result = (|| -> Result<[u8; 16], VaultError> {
+            let offset = calculate_data_offset(start_block)?;
+            session
+                .lock
+                .file_mut()
+                .seek(SeekFrom::Start(offset))
+                .map_err(|_| io_err())?;
 
-        session
-            .lock
-            .file_mut()
-            .write_all(&wrapped_dek)
-            .map_err(|e| {
-                eprintln!("WRITE WRAPPED_DEK ERROR: {e}");
-                io_err()
-            })?;
+            session
+                .lock
+                .file_mut()
+                .write_all(&wrapped_dek)
+                .map_err(|_| io_err())?;
 
-        let nonce = NonceFactory::generate()?;
-        session
-            .lock
-            .file_mut()
-            .write_all(nonce.as_bytes())
-            .map_err(|e| {
-                eprintln!("WRITE NONCE ERROR: {e}");
-                io_err()
-            })?;
+            let nonce = NonceFactory::generate()?;
+            session
+                .lock
+                .file_mut()
+                .write_all(nonce.as_bytes())
+                .map_err(|_| io_err())?;
 
-        let consumed = ConsumedNonce::new(nonce);
-        let mut limited_reader = reader.take(data_len);
-        let bytes_written = self
-            .crypto
-            .encrypt_stream(
+            let consumed = ConsumedNonce::new(nonce);
+            let mut limited_reader = reader.take(data_len);
+            let bytes_written = self.crypto.encrypt_stream(
                 &dek,
                 &mut limited_reader,
                 session.lock.file_mut(),
                 &aad,
                 consumed,
-            )
-            .map_err(|e| {
-                eprintln!("ENCRYPT_STREAM ERROR: {e:?}");
-                e
-            })?;
+            )?;
 
-        if bytes_written != encrypted_payload_size {
-            session
-                .space_manager
-                .deallocate(start_block, num_blocks)
-                .inspect_err(|_| {
-                    error!("CRITICAL: Space leak during rollback - bitmap inconsistent");
-                })?;
-            eprintln!("BYTES_WRITTEN {bytes_written} != expected {encrypted_payload_size}");
-            return Err(io_err());
+            if bytes_written != encrypted_payload_size {
+                return Err(io_err());
+            }
+
+            // SECURITY: Timestamp must be valid - no fallback to 0
+            let timestamp = get_timestamp()?;
+            let obj_type_arr: [u8; 32] = string_to_fixed_bytes(object_type);
+
+            let start_block_u32 = u32::try_from(start_block).map_err(|_| capacity_err())?;
+            let num_blocks_u32 = u32::try_from(num_blocks).map_err(|_| capacity_err())?;
+
+            let entry = FileTableEntry::new(
+                oid_bytes,
+                start_block_u32,
+                num_blocks_u32,
+                data_len,
+                timestamp,
+                obj_type_arr,
+                purpose_bytes,
+                wrapped_dek,
+                session.header.epoch(),
+            );
+
+            session.file_table.push(entry);
+            if let Err(e) = self.commit_header(session) {
+                if let Some(mut failed_entry) = session.file_table.pop() {
+                    failed_entry.zeroize_entry();
+                }
+                return Err(e);
+            }
+
+            Ok(oid_bytes)
+        })();
+
+        if add_result.is_err() {
+            let wipe_offset = match calculate_data_offset(start_block) {
+                Ok(v) => v,
+                Err(_) => {
+                    error!(
+                        start_block = start_block,
+                        "CRITICAL: Failed to compute rollback wipe offset"
+                    );
+                    0
+                }
+            };
+            let wipe_len = (num_blocks as usize).checked_mul(BLOCK_SIZE as usize);
+            if wipe_offset > 0 {
+                if let Some(len) = wipe_len {
+                    if let Err(wipe_err) =
+                        scb_vka_memory::secure_wipe(session.lock.file_mut(), wipe_offset, len)
+                    {
+                        error!(
+                            error = ?wipe_err.kind,
+                            "CRITICAL: Rollback secure wipe failed; ciphertext remnants may remain"
+                        );
+                    }
+                } else {
+                    error!("CRITICAL: Rollback wipe length overflow");
+                }
+            }
+
+            if let Err(dealloc_err) = session.space_manager.deallocate(start_block, num_blocks) {
+                error!(
+                    error = ?dealloc_err.kind,
+                    "CRITICAL: Space deallocation failed during rollback - bitmap may drift"
+                );
+            }
         }
 
-        // SECURITY: Timestamp must be valid - no fallback to 0
-        let timestamp = get_timestamp()?;
-        let obj_type_arr: [u8; 32] = string_to_fixed_bytes(object_type);
-
-        let start_block_u32 = u32::try_from(start_block).map_err(|_| capacity_err())?;
-        let num_blocks_u32 = u32::try_from(num_blocks).map_err(|_| capacity_err())?;
-
-        let entry = FileTableEntry::new(
-            oid_bytes,
-            start_block_u32,
-            num_blocks_u32,
-            data_len,
-            timestamp,
-            obj_type_arr,
-            purpose_bytes,
-            wrapped_dek,
-            session.header.epoch(),
-        );
-
-        session.file_table.push(entry);
-        self.commit_header(session)?;
-
-        debug!(
-            vid = %hex::encode(&session.vid[..8]),
-            object_id = %hex::encode(oid_bytes),
-            size = data_len,
-            "Object added"
-        );
-        Ok(oid_bytes)
+        if add_result.is_ok() {
+            debug!(
+                vid = %hex::encode(&session.vid[..8]),
+                object_id = %hex::encode(oid_bytes),
+                size = data_len,
+                "Object added"
+            );
+        }
+        add_result
     }
 
     #[instrument(skip(self, session, writer))]
@@ -1232,40 +1294,50 @@ fn read_encrypted_header(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use scb_vka_common::error::VaultError;
-    use scb_vka_hsp::HardwareEnclave;
+    use scb_vka_common::error::VaultErrorKind;
+    use std::io::{self, Read};
     use tempfile::TempDir;
     use zeroize::Zeroizing;
 
-    struct MockEnclave;
-    impl HardwareEnclave for MockEnclave {
-        fn sign_with_hardware_key(&self, ur: &[u8; 64]) -> Result<[u8; 64], VaultError> {
-            let mut mr = [0u8; 64];
-            mr.copy_from_slice(ur);
-            Ok(mr)
+    fn make_hardware_manager() -> Option<DefaultVaultManager> {
+        let manager = DefaultVaultManager::new();
+        if let Err(e) = manager.init_hardware() {
+            eprintln!(
+                "Skipping hardware-dependent orchestrator test (init_hardware failed: {:?})",
+                e.kind
+            );
+            return None;
         }
-        fn provider_name(&self) -> &'static str {
-            "Memory Mock"
-        }
-        fn init_hardware_keys(&self) -> Result<(), VaultError> {
-            Ok(())
-        }
-        fn has_hardware_key(&self) -> bool {
-            false
-        }
-        fn clear_hardware_keys(&self) -> Result<(), VaultError> {
-            Ok(())
+        Some(manager)
+    }
+
+    struct FailingReader {
+        sent: usize,
+        fail_after: usize,
+    }
+
+    impl Read for FailingReader {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.sent >= self.fail_after {
+                return Err(io::Error::other("intentional read failure"));
+            }
+            let remaining = self.fail_after - self.sent;
+            let n = remaining.min(buf.len());
+            buf[..n].fill(0x41);
+            self.sent += n;
+            Ok(n)
         }
     }
 
     #[test]
     fn test_full_vault_lifecycle() {
+        let Some(vault_manager) = make_hardware_manager() else {
+            return;
+        };
         let temp_dir = TempDir::new().unwrap();
         let path_buf = temp_dir.path().join("test_vault.bbox");
         let path = path_buf.as_path();
 
-        let hw_enclave = Box::new(MockEnclave);
-        let vault_manager = DefaultVaultManager::new_with(hw_enclave);
         let password = Zeroizing::new(b"StrongVaultPassword123!".to_vec());
 
         // 1. CREATE VAULT
@@ -1349,5 +1421,75 @@ mod tests {
         let _err = vault_manager
             .read_object(&mut session_after, &object_id1, &mut fail_buf)
             .unwrap_err();
+    }
+
+    #[test]
+    fn test_create_vault_refuses_existing_file() {
+        let Some(vault_manager) = make_hardware_manager() else {
+            return;
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let path_buf = temp_dir.path().join("existing_vault.bbox");
+        let path = path_buf.as_path();
+        std::fs::write(path, b"preexisting-data").unwrap();
+        let password = Zeroizing::new(b"StrongVaultPassword123!".to_vec());
+
+        let err = vault_manager.create_vault(path, &password).unwrap_err();
+        assert_eq!(err.kind, VaultErrorKind::InvalidInput);
+        assert_eq!(std::fs::read(path).unwrap(), b"preexisting-data");
+    }
+
+    #[test]
+    fn test_add_object_rollback_on_reader_error() {
+        let Some(vault_manager) = make_hardware_manager() else {
+            return;
+        };
+        let temp_dir = TempDir::new().unwrap();
+        let path_buf = temp_dir.path().join("rollback_vault.bbox");
+        let path = path_buf.as_path();
+        let password = Zeroizing::new(b"StrongVaultPassword123!".to_vec());
+
+        vault_manager.create_vault(path, &password).unwrap();
+        let mut session = vault_manager.unlock_vault(path, &password).unwrap();
+
+        let mut failing_reader = FailingReader {
+            sent: 0,
+            fail_after: 512,
+        };
+
+        let add_err = vault_manager
+            .add_object(
+                &mut session,
+                "text/plain",
+                "rollback-test",
+                2048,
+                &mut failing_reader,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            add_err.kind,
+            VaultErrorKind::IoError | VaultErrorKind::OperationFailed
+        ));
+
+        let objects_after_failure = vault_manager.list_objects(&session).unwrap();
+        assert!(objects_after_failure.is_empty());
+
+        let payload = b"clean-data-after-failure";
+        let mut good_reader = std::io::Cursor::new(payload);
+        let oid = vault_manager
+            .add_object(
+                &mut session,
+                "text/plain",
+                "post-rollback",
+                payload.len() as u64,
+                &mut good_reader,
+            )
+            .unwrap();
+
+        let mut out = Vec::new();
+        vault_manager
+            .read_object(&mut session, &oid, &mut out)
+            .unwrap();
+        assert_eq!(out, payload);
     }
 }

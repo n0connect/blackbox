@@ -46,6 +46,10 @@ fuzz:
 	cargo +nightly fuzz run fuzz_parser -- -max_total_time=$(FUZZ_TIME)
 	@echo "--> Fuzzing Crypto Engine..."
 	cargo +nightly fuzz run fuzz_crypto_decrypt -- -max_total_time=$(FUZZ_TIME)
+	@echo "--> Fuzzing Layout Parsers..."
+	cargo +nightly fuzz run fuzz_layout_parse -- -max_total_time=$(FUZZ_TIME)
+	@echo "--> Fuzzing Space Manager..."
+	cargo +nightly fuzz run fuzz_space_manager -- -max_total_time=$(FUZZ_TIME)
 
 # 5. Combined Testing sequence
 test: test-core fuzz

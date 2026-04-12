@@ -7,6 +7,8 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+[workspace]
+
 [dependencies]
 libfuzzer-sys = "0.4"
 
@@ -18,6 +20,9 @@ path = "../crates/scb-vka-crypto"
 
 [dependencies.scb-vka-shell]
 path = "../crates/scb-vka-shell"
+
+[dependencies.scb-vka-io]
+path = "../crates/scb-vka-io"
 
 [dependencies.zeroize]
 version = "1.8.1"
@@ -37,6 +42,20 @@ doc = false
 [[bin]]
 name = "fuzz_ansi"
 path = "fuzz_targets/fuzz_ansi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_layout_parse"
+path = "fuzz_targets/fuzz_layout_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_space_manager"
+path = "fuzz_targets/fuzz_space_manager.rs"
 test = false
 doc = false
 bench = false

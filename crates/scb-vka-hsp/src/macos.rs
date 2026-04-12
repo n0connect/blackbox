@@ -27,7 +27,7 @@ use scb_vka_common::error::{VaultError, VaultErrorKind};
 use sha3::{Digest, Sha3_512};
 use std::ptr;
 use std::sync::Mutex;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use zeroize::Zeroize;
 
 use core_foundation::base::{CFType, TCFType};
@@ -51,8 +51,16 @@ use p256::NistP256;
 // CONSTANTS
 // =============================================================================
 
-/// Application-specific key label for BlackBox Secure Enclave key
-const KEY_LABEL: &str = "com.blackbox.vault.enclave.v1";
+/// Application-specific key label for direct Secure Enclave key.
+const KEY_LABEL_DIRECT: &str = "com.blackbox.vault.enclave.v1";
+/// Suffix used for software-isolated Keychain fallback key.
+const KEYCHAIN_FALLBACK_SUFFIX: &str = ".keychain-fallback";
+/// macOS Security.framework error for missing entitlements/profile.
+const ERR_SEC_MISSING_ENTITLEMENT: i64 = -34_018;
+/// macOS generic parameter error frequently returned for invalid SE profile context.
+const ERR_SEC_PARAM: i64 = -50;
+/// Item not found error.
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25_300;
 
 /// Domain separation tag for hash-to-curve (RFC 9380)
 const HASH_TO_CURVE_DST: &[u8] = b"BLACKBOX-V1-P256_XMD:SHA-256_SSWU_RO_";
@@ -75,7 +83,8 @@ const ECDH_SHARED_SECRET_LEN: usize = 32;
 /// Uses P-256 ECDH key agreement for secure key derivation.
 /// The private key is stored in the Secure Enclave and never exported.
 pub struct MacOSEnclave {
-    key_label: String,
+    direct_key_label: String,
+    fallback_key_label: String,
     /// Mutex to prevent TOCTOU race condition in key creation
     key_creation_lock: Mutex<()>,
 }
@@ -84,17 +93,18 @@ impl MacOSEnclave {
     /// Create a new Secure Enclave instance.
     pub fn new() -> Self {
         // Allow isolated tests to create parallel keychain instances without data races
-        let key_label =
-            std::env::var("BLACKBOX_TEST_KEY_LABEL").unwrap_or_else(|_| KEY_LABEL.to_string());
+        let direct_key_label = std::env::var("BLACKBOX_TEST_KEY_LABEL")
+            .unwrap_or_else(|_| KEY_LABEL_DIRECT.to_string());
+        let fallback_key_label = format!("{direct_key_label}{KEYCHAIN_FALLBACK_SUFFIX}");
 
         Self {
-            key_label,
+            direct_key_label,
+            fallback_key_label,
             key_creation_lock: Mutex::new(()),
         }
     }
 
-    /// Retrieve existing Secure Enclave key from Keychain.
-    fn find_existing_key(&self) -> Option<SecKey> {
+    fn find_existing_key_for_label(&self, label: &str) -> Option<SecKey> {
         unsafe {
             let mut query: CFMutableDictionary<CFString, CFType> = CFMutableDictionary::new();
 
@@ -102,30 +112,18 @@ impl MacOSEnclave {
                 CFString::wrap_under_get_rule(kSecClass),
                 CFString::wrap_under_get_rule(kSecClassKey).as_CFType(),
             );
-            // In unsigned test environments, standard keychain categorizes headless keys loosely.
-            #[cfg(not(test))]
-            if !cfg!(debug_assertions) {
-                query.set(
-                    CFString::wrap_under_get_rule(kSecAttrKeyClass),
-                    CFString::wrap_under_get_rule(kSecAttrKeyClassPrivate).as_CFType(),
-                );
-            }
-
-            let label_key = if cfg!(debug_assertions) {
-                CFString::wrap_under_get_rule(kSecAttrLabel)
-            } else {
-                CFString::wrap_under_get_rule(kSecAttrApplicationLabel)
-            };
-            query.set(label_key, CFString::new(&self.key_label).as_CFType());
-
-            // Unsigned test binaries fallback to standard Keychain which might label them differently
-            #[cfg(not(test))]
-            if !cfg!(debug_assertions) {
-                query.set(
-                    CFString::wrap_under_get_rule(kSecAttrKeyType),
-                    CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom).as_CFType(),
-                );
-            }
+            query.set(
+                CFString::wrap_under_get_rule(kSecAttrKeyClass),
+                CFString::wrap_under_get_rule(kSecAttrKeyClassPrivate).as_CFType(),
+            );
+            query.set(
+                CFString::wrap_under_get_rule(kSecAttrKeyType),
+                CFString::wrap_under_get_rule(kSecAttrKeyTypeECSECPrimeRandom).as_CFType(),
+            );
+            query.set(
+                CFString::wrap_under_get_rule(kSecAttrLabel),
+                CFString::new(label).as_CFType(),
+            );
 
             query.set(
                 CFString::wrap_under_get_rule(kSecReturnRef),
@@ -136,17 +134,54 @@ impl MacOSEnclave {
             let status = SecItemCopyMatching(query.as_concrete_TypeRef(), &mut item_ref);
 
             if status == 0 && !item_ref.is_null() {
-                debug!("Found existing Secure Enclave key");
+                debug!("Found existing macOS key for label: {}", label);
                 Some(SecKey::wrap_under_create_rule(item_ref as SecKeyRef))
             } else {
-                debug!("No existing Secure Enclave key found (status: {})", status);
+                debug!(
+                    "No existing macOS key found for label {} (status: {})",
+                    label, status
+                );
                 None
             }
         }
     }
 
-    /// Create a new Secure Enclave key for ECDH key agreement.
-    fn create_enclave_key(&self) -> Result<SecKey, VaultError> {
+    fn find_existing_direct_key(&self) -> Option<SecKey> {
+        self.find_existing_key_for_label(&self.direct_key_label)
+    }
+
+    fn find_existing_fallback_key(&self) -> Option<SecKey> {
+        self.find_existing_key_for_label(&self.fallback_key_label)
+    }
+
+    fn current_key(&self) -> Option<(SecKey, bool)> {
+        if let Some(key) = self.find_existing_direct_key() {
+            return Some((key, true));
+        }
+        if let Some(key) = self.find_existing_fallback_key() {
+            return Some((key, false));
+        }
+        None
+    }
+
+    fn cf_error_details(error: CFErrorRef) -> (i64, String) {
+        unsafe {
+            if error.is_null() {
+                return (0, "Unknown error".to_string());
+            }
+            let err_wrapper = core_foundation::error::CFError::wrap_under_get_rule(error);
+            let code = err_wrapper.code() as i64;
+            let desc = format!("Error {}: {}", code, err_wrapper.description());
+            core_foundation::base::CFRelease(error as core_foundation::base::CFTypeRef);
+            (code, desc)
+        }
+    }
+
+    fn create_key_for_label(
+        &self,
+        label: &str,
+        require_secure_enclave: bool,
+    ) -> Result<SecKey, (i64, String)> {
         unsafe {
             let mut attributes: CFMutableDictionary<CFString, CFType> = CFMutableDictionary::new();
 
@@ -160,11 +195,7 @@ impl MacOSEnclave {
                 CFNumber::from(256_i32).as_CFType(),
             );
 
-            // CRITICAL: Bind to Secure Enclave
-            // Unsigned binaries or CLI executed without Entitlements will hit -34018
-            // We conditionally fall back to standard Keychain when tested headless
-            #[cfg(not(test))]
-            if !cfg!(debug_assertions) {
+            if require_secure_enclave {
                 attributes.set(
                     CFString::wrap_under_get_rule(kSecAttrTokenID),
                     CFString::wrap_under_get_rule(kSecAttrTokenIDSecureEnclave).as_CFType(),
@@ -175,17 +206,12 @@ impl MacOSEnclave {
             let mut private_key_attrs: CFMutableDictionary<CFString, CFType> =
                 CFMutableDictionary::new();
 
-            // In unsigned debug binaries / CI tests, requiring explicit SecureEnclave checks
-            // (-34018 errSecMissingEntitlement) fails. But standard Keychain permits generic persistent
-            // keys without application-identifier entitlements.
             private_key_attrs.set(
                 CFString::wrap_under_get_rule(kSecAttrIsPermanent),
                 CFBoolean::true_value().as_CFType(),
             );
 
-            // Add Explicit Access Control to bypass Biometry/TouchID interactive prompts for CI/CD
-            #[cfg(not(test))]
-            if !cfg!(debug_assertions) {
+            if require_secure_enclave {
                 use security_framework_sys::access_control::*;
                 let mut ac_err: CFErrorRef = ptr::null_mut();
                 let access_control = SecAccessControlCreateWithFlags(
@@ -197,20 +223,15 @@ impl MacOSEnclave {
                 if !access_control.is_null() {
                     private_key_attrs.set(
                         CFString::wrap_under_get_rule(kSecAttrAccessControl),
-                        /* Type mismatch bypass since sys wrappers define opaque ptrs differently */
                         CFType::wrap_under_create_rule(access_control as *const std::ffi::c_void),
                     );
-                    // We do NOT release access_control here since dictionary `.set` retains it,
-                    // but wrapped under `create_rule` handles drop cleanly
                 }
             }
 
-            let label_key = if cfg!(debug_assertions) {
-                CFString::wrap_under_get_rule(kSecAttrLabel)
-            } else {
-                CFString::wrap_under_get_rule(kSecAttrApplicationLabel)
-            };
-            private_key_attrs.set(label_key, CFString::new(&self.key_label).as_CFType());
+            private_key_attrs.set(
+                CFString::wrap_under_get_rule(kSecAttrLabel),
+                CFString::new(label).as_CFType(),
+            );
 
             attributes.set(
                 CFString::wrap_under_get_rule(kSecPrivateKeyAttrs),
@@ -221,43 +242,73 @@ impl MacOSEnclave {
             let sec_key_ref = SecKeyCreateRandomKey(attributes.as_concrete_TypeRef(), &mut error);
 
             if sec_key_ref.is_null() {
-                let error_desc = if !error.is_null() {
-                    // Redact detailed error info in release builds
-                    let err_wrapper = core_foundation::error::CFError::wrap_under_get_rule(error);
-                    let code = err_wrapper.code();
-                    let desc = format!("Error {}: {}", code, err_wrapper.description());
-                    core_foundation::base::CFRelease(error as core_foundation::base::CFTypeRef);
-
-                    // No fallback! We strictly enforce Secure Enclave (SE) in release builds.
-                    // If we get errSecMissingEntitlement (-34018), we must instruct the user to codesign.
-                    if code == -34018 {
-                        tracing::error!(
-                            "Secure Enclave access denied. You MUST codesign the binary with entitlements to use BlackBox in release mode. \
-                            Run `codesign -s - --entitlements entitlements.plist --force target/release/blackbox`"
-                        );
-                    }
-
-                    desc
-                } else {
-                    "Unknown error".to_string()
-                };
-                error!("Failed to create Secure Enclave key: {}", error_desc);
-                return Err(VaultError::new(VaultErrorKind::HardwareUnavailable));
+                return Err(Self::cf_error_details(error));
             }
 
-            debug!("Created new Secure Enclave key");
+            debug!(
+                "Created new {} key",
+                if require_secure_enclave {
+                    "Secure Enclave"
+                } else {
+                    "Keychain fallback"
+                }
+            );
             Ok(SecKey::wrap_under_create_rule(sec_key_ref))
+        }
+    }
+
+    /// Create macOS hardware key. Tries direct Secure Enclave first, then Keychain fallback.
+    fn create_enclave_key(&self) -> Result<SecKey, VaultError> {
+        match self.create_key_for_label(&self.direct_key_label, true) {
+            Ok(key) => {
+                info!("Initialized direct Secure Enclave key (hardware-backed).");
+                Ok(key)
+            }
+            Err((code, desc)) => {
+                let maybe_profile_issue =
+                    code == ERR_SEC_MISSING_ENTITLEMENT || code == ERR_SEC_PARAM;
+                if maybe_profile_issue {
+                    warn!(
+                        "Direct Secure Enclave initialization failed ({}). \
+                         Falling back to software-isolated Keychain key due missing/invalid provisioning profile.",
+                        desc
+                    );
+                } else {
+                    warn!(
+                        "Direct Secure Enclave initialization failed ({}). \
+                         Falling back to software-isolated Keychain mode.",
+                        desc
+                    );
+                }
+                warn!(
+                    "Security notice: Keychain fallback increases attack surface. \
+                     For full security posture install/update Xcode provisioning profile and entitlements."
+                );
+                self.create_key_for_label(&self.fallback_key_label, false)
+                    .map_err(|(_, fallback_desc)| {
+                        error!(
+                            "Failed to create Keychain fallback key after SE failure: {}",
+                            fallback_desc
+                        );
+                        VaultError::new(VaultErrorKind::HardwareUnavailable)
+                    })
+            }
         }
     }
 
     /// Get the existing Secure Enclave key. Fails if not initialized.
     fn get_key(&self) -> Result<SecKey, VaultError> {
-        if let Some(key) = self.find_existing_key() {
-            Ok(key)
-        } else {
-            error!("Secure Enclave key not found. Run blackbox init first.");
-            Err(VaultError::new(VaultErrorKind::HardwareUnavailable))
+        if let Some((key, is_direct)) = self.current_key() {
+            if !is_direct {
+                warn!(
+                    "Using Keychain fallback key (software isolation). \
+                     Install/update provisioning profile for direct Secure Enclave mode."
+                );
+            }
+            return Ok(key);
         }
+        error!("Secure Enclave key not found. Run blackbox init first.");
+        Err(VaultError::new(VaultErrorKind::HardwareUnavailable))
     }
 
     /// Convert UR to a valid P-256 public key using hash-to-curve (RFC 9380).
@@ -461,8 +512,15 @@ impl HardwareEnclave for MacOSEnclave {
 
     fn init_hardware_keys(&self) -> Result<(), VaultError> {
         // First try without lock (fast path)
-        if self.find_existing_key().is_some() {
-            info!("Hardware keys already initialized.");
+        if let Some((_, is_direct)) = self.current_key() {
+            if is_direct {
+                info!("Hardware keys already initialized in direct Secure Enclave mode.");
+            } else {
+                warn!(
+                    "Hardware keys already initialized in Keychain fallback mode. \
+                     Install/update provisioning profile to migrate to direct Secure Enclave mode."
+                );
+            }
             return Ok(());
         }
 
@@ -473,7 +531,7 @@ impl HardwareEnclave for MacOSEnclave {
         })?;
 
         // Double-check after acquiring lock
-        if self.find_existing_key().is_some() {
+        if self.current_key().is_some() {
             debug!("Key found after acquiring lock (created by another thread)");
             return Ok(());
         }
@@ -485,34 +543,39 @@ impl HardwareEnclave for MacOSEnclave {
     }
 
     fn has_hardware_key(&self) -> bool {
-        self.find_existing_key().is_some()
+        self.current_key().is_some()
     }
 
     fn clear_hardware_keys(&self) -> Result<(), VaultError> {
-        unsafe {
-            let mut query: CFMutableDictionary<CFString, CFType> = CFMutableDictionary::new();
-
-            query.set(
-                CFString::wrap_under_get_rule(kSecClass),
-                CFString::wrap_under_get_rule(kSecClassKey).as_CFType(),
-            );
-            query.set(
-                CFString::wrap_under_get_rule(kSecAttrApplicationLabel),
-                CFString::new(&self.key_label).as_CFType(),
-            );
-
-            // Import necessary function or refer to it correctly
-            let status =
-                security_framework_sys::keychain_item::SecItemDelete(query.as_concrete_TypeRef());
-
-            // errSecSuccess = 0, errSecItemNotFound = -25300
-            if status == 0 || status == -25300 {
-                info!("Secure Enclave hardware keys permanently deleted");
-                Ok(())
-            } else {
-                error!("Failed to delete Secure Enclave keys (status: {})", status);
-                Err(VaultError::new(VaultErrorKind::OperationFailed))
+        fn delete_label(label: &str) -> i32 {
+            unsafe {
+                let mut query: CFMutableDictionary<CFString, CFType> = CFMutableDictionary::new();
+                query.set(
+                    CFString::wrap_under_get_rule(kSecClass),
+                    CFString::wrap_under_get_rule(kSecClassKey).as_CFType(),
+                );
+                query.set(
+                    CFString::wrap_under_get_rule(kSecAttrLabel),
+                    CFString::new(label).as_CFType(),
+                );
+                security_framework_sys::keychain_item::SecItemDelete(query.as_concrete_TypeRef())
             }
+        }
+
+        let direct_status = delete_label(&self.direct_key_label);
+        let fallback_status = delete_label(&self.fallback_key_label);
+
+        let ok_direct = direct_status == 0 || direct_status == ERR_SEC_ITEM_NOT_FOUND;
+        let ok_fallback = fallback_status == 0 || fallback_status == ERR_SEC_ITEM_NOT_FOUND;
+        if ok_direct && ok_fallback {
+            info!("Secure Enclave / fallback Keychain keys permanently deleted");
+            Ok(())
+        } else {
+            error!(
+                "Failed to delete macOS keys (direct status: {}, fallback status: {})",
+                direct_status, fallback_status
+            );
+            Err(VaultError::new(VaultErrorKind::OperationFailed))
         }
     }
 }

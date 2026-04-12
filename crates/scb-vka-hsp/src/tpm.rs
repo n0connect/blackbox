@@ -6,9 +6,8 @@
 //!
 //! Platform support:
 //! - Linux: /dev/tpmrm0 (kernel resource manager)
-//! - Windows: TBS (TPM Base Services)
 
-#![cfg(any(target_os = "linux", target_os = "windows"))]
+#![cfg(target_os = "linux")]
 
 use crate::HardwareEnclave;
 use scb_vka_common::error::{VaultError, VaultErrorKind};
@@ -67,23 +66,18 @@ impl TpmEnclave {
     /// SECURITY: Ignores TSS2_TCTI environment variable to prevent hijacking.
     fn get_tcti(&self) -> &str {
         self.tcti_cache.get_or_init(|| {
-            if cfg!(target_os = "windows") {
-                // Windows: TPM Base Services
-                "tbs:".to_string()
+            // Linux: Kernel TPM Resource Manager (preferred)
+            // Detection happens at connection time, not construction
+            if std::path::Path::new("/dev/tpmrm0").exists() {
+                debug!("Using TPM resource manager: /dev/tpmrm0");
+                "device:/dev/tpmrm0".to_string()
+            } else if std::path::Path::new("/dev/tpm0").exists() {
+                warn!("Using raw TPM device /dev/tpm0 - resource manager recommended");
+                "device:/dev/tpm0".to_string()
             } else {
-                // Linux: Kernel TPM Resource Manager (preferred)
-                // Detection happens at connection time, not construction
-                if std::path::Path::new("/dev/tpmrm0").exists() {
-                    debug!("Using TPM resource manager: /dev/tpmrm0");
-                    "device:/dev/tpmrm0".to_string()
-                } else if std::path::Path::new("/dev/tpm0").exists() {
-                    warn!("Using raw TPM device /dev/tpm0 - resource manager recommended");
-                    "device:/dev/tpm0".to_string()
-                } else {
-                    // Fallback to tabrmd (TPM2 Access Broker & Resource Manager Daemon)
-                    debug!("Attempting tabrmd connection");
-                    "tabrmd:".to_string()
-                }
+                // Fallback to tabrmd (TPM2 Access Broker & Resource Manager Daemon)
+                debug!("Attempting tabrmd connection");
+                "tabrmd:".to_string()
             }
         })
     }
@@ -258,11 +252,7 @@ impl HardwareEnclave for TpmEnclave {
     }
 
     fn provider_name(&self) -> &'static str {
-        if cfg!(target_os = "windows") {
-            "TPM 2.0 (Windows TBS)"
-        } else {
-            "TPM 2.0 (Linux)"
-        }
+        "TPM 2.0 (Linux)"
     }
 
     fn clear_hardware_keys(&self) -> Result<(), VaultError> {
@@ -293,9 +283,7 @@ mod tests {
         // Should return a valid TCTI string
         assert!(!tcti.is_empty());
         // Should be one of the expected formats
-        assert!(
-            tcti.starts_with("device:") || tcti.starts_with("tbs:") || tcti.starts_with("tabrmd:")
-        );
+        assert!(tcti.starts_with("device:") || tcti.starts_with("tabrmd:"));
     }
 
     #[test]

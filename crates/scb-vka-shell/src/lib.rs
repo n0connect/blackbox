@@ -221,7 +221,7 @@ where
         {
             Ok(bytes_read) => {
                 // SH-03: Try to display as text but sanitize to prevent Terminal Injection
-                match String::from_utf8(buf.to_vec()) {
+                match std::str::from_utf8(buf.as_slice()) {
                     Ok(text) => {
                         // SH-03: Strict whitelisting to prevent Terminal Injection (ANSI escape)
                         // A blacklist is insufficient because of the complexity of terminal emulators.
